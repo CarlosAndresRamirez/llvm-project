@@ -9,8 +9,7 @@
 
 #
 # This script performs a monolithic build of the monorepo and runs the tests of
-# most projects on Linux. This should be replaced by per-project scripts that
-# run only the relevant tests.
+# most projects on Linux.
 #
 
 source .ci/utils.sh
@@ -27,13 +26,31 @@ targets="${2}"
 runtimes="${3}"
 runtime_targets="${4}"
 runtime_targets_needs_reconfig="${5}"
-enable_cir="${6}"
 
 lit_args="-v --xunit-xml-output ${BUILD_DIR}/test-results.xml --use-unique-output-file-name --timeout=1200 --time-tests --succinct"
 
+runtime_cmake_args=()
+if [[ " ${runtime_targets} " == *" check-libclc "* ]]; then
+  runtime_cmake_args+=(
+    -D RUNTIMES_amdgcn-amd-amdhsa-llvm_LLVM_ENABLE_RUNTIMES=libclc
+    -D LLVM_RUNTIME_TARGETS="default;amdgcn-amd-amdhsa-llvm"
+  )
+fi
+
+if [[ " ${runtime_targets} " == *" check-libc "* ]]; then
+  libc_kernel_headers="/usr/include"
+  if [[ -d "/usr/include/$(uname -m)-linux-gnu" ]]; then
+    libc_kernel_headers="${libc_kernel_headers};/usr/include/$(uname -m)-linux-gnu"
+  fi
+  runtime_cmake_args+=(
+    -D LLVM_LIBC_FULL_BUILD=ON
+    -D LIBC_TEST_SKIP_DEATH_TESTS=ON
+    -D LIBC_TEST_SKIP_SHARED_TESTS=ON
+    -D LIBC_KERNEL_HEADERS="${libc_kernel_headers}"
+  )
+fi
+
 start-group "CMake"
-export PIP_BREAK_SYSTEM_PACKAGES=1
-pip install -q -r "${MONOREPO_ROOT}"/.ci/all_requirements.txt
 
 # Set the system llvm-symbolizer as preferred.
 export LLVM_SYMBOLIZER_PATH=`which llvm-symbolizer`
@@ -47,7 +64,6 @@ cmake -S "${MONOREPO_ROOT}"/llvm -B "${BUILD_DIR}" \
       -G Ninja \
       -D CMAKE_PREFIX_PATH="${HOME}/.local" \
       -D CMAKE_BUILD_TYPE=Release \
-      -D CLANG_ENABLE_CIR=${enable_cir} \
       -D LLVM_ENABLE_ASSERTIONS=ON \
       -D LLVM_BUILD_EXAMPLES=ON \
       -D COMPILER_RT_BUILD_LIBFUZZER=OFF \
@@ -56,27 +72,35 @@ cmake -S "${MONOREPO_ROOT}"/llvm -B "${BUILD_DIR}" \
       -D CMAKE_CXX_FLAGS=-gmlt \
       -D CMAKE_C_COMPILER_LAUNCHER=sccache \
       -D CMAKE_CXX_COMPILER_LAUNCHER=sccache \
+      -D CMAKE_DISABLE_PRECOMPILE_HEADERS=ON \
       -D LIBCXX_CXX_ABI=libcxxabi \
       -D MLIR_ENABLE_BINDINGS_PYTHON=ON \
       -D LLDB_ENABLE_PYTHON=ON \
       -D LLDB_ENFORCE_STRICT_TEST_REQUIREMENTS=ON \
       -D CMAKE_INSTALL_PREFIX="${INSTALL_DIR}" \
-      -D CMAKE_EXE_LINKER_FLAGS="-no-pie"
+      -D CMAKE_EXE_LINKER_FLAGS="-no-pie" \
+      -D LLVM_ENABLE_WERROR=ON \
+      -D LLVM_BINUTILS_INCDIR=/usr \
+      "${runtime_cmake_args[@]}"
 
 start-group "ninja"
 
-# Targets are not escaped as they are passed as separate arguments.
-ninja -C "${BUILD_DIR}" -k 0 ${targets} |& tee ninja.log
+if [[ -n "${targets}" ]]; then
+  # Targets are not escaped as they are passed as separate arguments.
+  ninja -C "${BUILD_DIR}" -k 0 ${targets} |& tee ninja.log
+  cp ${BUILD_DIR}/.ninja_log ninja.ninja_log
+fi
 
-if [[ "${runtime_targets}" != "" ]]; then
+if [[ -n "${runtime_targets}" ]]; then
   start-group "ninja Runtimes"
 
   ninja -C "${BUILD_DIR}" ${runtime_targets} |& tee ninja_runtimes.log
+  cp ${BUILD_DIR}/.ninja_log ninja_runtimes.ninja_log
 fi
 
 # Compiling runtimes with just-built Clang and running their tests
 # as an additional testing for Clang.
-if [[ "${runtime_targets_needs_reconfig}" != "" ]]; then
+if [[ -n "${runtime_targets_needs_reconfig}" ]]; then
   start-group "CMake Runtimes C++26"
 
   cmake \
@@ -88,6 +112,7 @@ if [[ "${runtime_targets_needs_reconfig}" != "" ]]; then
 
   ninja -C "${BUILD_DIR}" ${runtime_targets_needs_reconfig} \
     |& tee ninja_runtimes_needs_reconfig1.log
+  cp ${BUILD_DIR}/.ninja_log ninja_runtimes_needs_reconig.ninja_log
 
   start-group "CMake Runtimes Clang Modules"
 
@@ -100,4 +125,5 @@ if [[ "${runtime_targets_needs_reconfig}" != "" ]]; then
 
   ninja -C "${BUILD_DIR}" ${runtime_targets_needs_reconfig} \
     |& tee ninja_runtimes_needs_reconfig2.log
+  cp ${BUILD_DIR}/.ninja_log ninja_runtimes_needs_reconfig2.ninja_log
 fi

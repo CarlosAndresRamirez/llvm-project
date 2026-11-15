@@ -18,15 +18,16 @@
 
 using namespace lldb_private;
 
-#ifndef __APPLE__
+// OpenBSD has no /proc.
+#if !defined(__APPLE__) && !defined(__OpenBSD__)
 TEST(Support, getProcFile_Pid) {
   auto BufferOrError = getProcFile(getpid(), "status");
   ASSERT_TRUE(BufferOrError);
   ASSERT_TRUE(*BufferOrError);
 }
-#endif // #ifndef __APPLE__
+#endif // !defined(__APPLE__) && !defined(__OpenBSD__)
 
-#if defined(_AIX) || defined(__linux__)
+#if (defined(_AIX) || defined(__linux__)) && defined(LLVM_ENABLE_THREADING)
 TEST(Support, getProcFile_Tid) {
   auto BufferOrError = getProcFile(getpid(), llvm::get_threadid(),
 #ifdef _AIX
@@ -38,4 +39,5 @@ TEST(Support, getProcFile_Tid) {
   ASSERT_TRUE(BufferOrError);
   ASSERT_TRUE(*BufferOrError);
 }
-#endif // #if defined(_AIX) || defined(__linux__)
+#endif // #if (defined(_AIX) || defined(__linux__)) &&
+       // defined(LLVM_ENABLE_THREADING)

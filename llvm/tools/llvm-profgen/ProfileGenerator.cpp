@@ -11,8 +11,8 @@
 #include "Options.h"
 #include "PerfReader.h"
 #include "ProfiledBinary.h"
-#include "llvm/DebugInfo/Symbolize/SymbolizableModule.h"
 #include "llvm/ProfileData/ProfileCommon.h"
+#include "llvm/Support/Timer.h"
 #include <algorithm>
 #include <float.h>
 #include <unordered_set>
@@ -64,6 +64,12 @@ static cl::opt<bool>
                              "than threshold, it will be trimmed."),
                     cl::cat(ProfGenCategory));
 
+static cl::opt<bool> MarkAllContextPreinlined(
+    "mark-all-context-preinlined",
+    cl::desc("Mark all function samples as preinlined(set "
+             "ContextShouldBeInlined attribute)."),
+    cl::init(false));
+
 static cl::opt<bool> CSProfMergeColdContext(
     "csprof-merge-cold-context", cl::init(true),
     cl::desc("If the total count of context profile is smaller than "
@@ -88,10 +94,10 @@ static cl::opt<double> ProfileDensityThreshold(
     "profile-density-threshold", cl::init(50),
     cl::desc("If the profile density is below the given threshold, it "
              "will be suggested to increase the sampling rate."),
-    cl::Optional, cl::cat(ProfGenCategory));
+    cl::cat(ProfGenCategory));
 static cl::opt<bool> ShowDensity("show-density", cl::init(false),
                                  cl::desc("show profile density details"),
-                                 cl::Optional, cl::cat(ProfGenCategory));
+                                 cl::cat(ProfGenCategory));
 static cl::opt<int> ProfileDensityCutOffHot(
     "profile-density-cutoff-hot", cl::init(990000),
     cl::desc("Total samples cutoff for functions used to calculate "
@@ -101,7 +107,7 @@ static cl::opt<int> ProfileDensityCutOffHot(
 static cl::opt<bool> UpdateTotalSamples(
     "update-total-samples", cl::init(false),
     cl::desc("Update total samples by accumulating all its body samples."),
-    cl::Optional, cl::cat(ProfGenCategory));
+    cl::cat(ProfGenCategory));
 
 static cl::opt<bool> GenCSNestedProfile(
     "gen-cs-nested-profile", cl::Hidden, cl::init(true),
@@ -111,7 +117,7 @@ cl::opt<bool> InferMissingFrames(
     "infer-missing-frames", cl::init(true),
     cl::desc(
         "Infer missing call frames due to compiler tail call elimination."),
-    cl::Optional, cl::cat(ProfGenCategory));
+    cl::cat(ProfGenCategory));
 
 namespace sampleprof {
 
@@ -238,10 +244,10 @@ bool ProfileGeneratorBase::filterAmbiguousProfile(FunctionSamples &FS) {
 // from the profile map during the profile generation time. The profiles are all
 // cold functions, it won't have perf impact.
 void ProfileGeneratorBase::filterAmbiguousProfile(SampleProfileMap &Profiles) {
-  for (auto I = ProfileMap.begin(); I != ProfileMap.end();) {
+  for (auto I = Profiles.begin(); I != Profiles.end();) {
     auto FS = I++;
     if (filterAmbiguousProfile(FS->second))
-      ProfileMap.erase(FS);
+      Profiles.erase(FS);
   }
 }
 
@@ -427,7 +433,7 @@ void ProfileGeneratorBase::updateFunctionSamples() {
 }
 
 void ProfileGeneratorBase::collectProfiledFunctions() {
-  std::unordered_set<const BinaryFunction *> ProfiledFunctions;
+  SmallPtrSet<const BinaryFunction *, 0> ProfiledFunctions;
   if (collectFunctionsFromRawProfile(ProfiledFunctions))
     Binary->setProfiledFunctions(ProfiledFunctions);
   else if (collectFunctionsFromLLVMProfile(ProfiledFunctions))
@@ -437,7 +443,7 @@ void ProfileGeneratorBase::collectProfiledFunctions() {
 }
 
 bool ProfileGeneratorBase::collectFunctionsFromRawProfile(
-    std::unordered_set<const BinaryFunction *> &ProfiledFunctions) {
+    SmallPtrSetImpl<const BinaryFunction *> &ProfiledFunctions) {
   if (!SampleCounters)
     return false;
   // Go through all the stacks, ranges and branches in sample counters, use
@@ -470,7 +476,7 @@ bool ProfileGeneratorBase::collectFunctionsFromRawProfile(
 }
 
 bool ProfileGenerator::collectFunctionsFromLLVMProfile(
-    std::unordered_set<const BinaryFunction *> &ProfiledFunctions) {
+    SmallPtrSetImpl<const BinaryFunction *> &ProfiledFunctions) {
   for (const auto &FS : ProfileMap) {
     if (auto *Func = Binary->getBinaryFunction(FS.second.getFunction()))
       ProfiledFunctions.insert(Func);
@@ -479,7 +485,7 @@ bool ProfileGenerator::collectFunctionsFromLLVMProfile(
 }
 
 bool CSProfileGenerator::collectFunctionsFromLLVMProfile(
-    std::unordered_set<const BinaryFunction *> &ProfiledFunctions) {
+    SmallPtrSetImpl<const BinaryFunction *> &ProfiledFunctions) {
   for (auto *Node : ContextTracker) {
     if (!Node->getFuncName().empty())
       if (auto *Func = Binary->getBinaryFunction(Node->getFuncName()))
@@ -495,10 +501,15 @@ ProfileGenerator::getTopLevelFunctionProfile(FunctionId FuncName) {
 }
 
 void ProfileGenerator::generateProfile() {
+  NamedRegionTimer T("generate", "Generate profile", "profgen", "llvm-profgen",
+                     TimeProfGen);
   collectProfiledFunctions();
 
-  if (Binary->usePseudoProbes())
+  if (Binary->usePseudoProbes()) {
     Binary->decodePseudoProbe();
+    if (LoadFunctionFromSymbol)
+      Binary->loadSymbolsFromPseudoProbe();
+  }
 
   if (SampleCounters) {
     if (Binary->usePseudoProbes()) {
@@ -511,15 +522,23 @@ void ProfileGenerator::generateProfile() {
   postProcessProfiles();
 }
 
+void ProfileGeneratorBase::markAllContextPreinlined(
+    SampleProfileMap &ProfileMap) {
+  for (auto &I : ProfileMap)
+    I.second.setContextAttribute(ContextShouldBeInlined);
+  FunctionSamples::ProfileIsPreInlined = true;
+}
+
 void ProfileGenerator::postProcessProfiles() {
   computeSummaryAndThreshold(ProfileMap);
-  trimColdProfiles(ProfileMap, ColdCountThreshold);
+  trimColdProfiles(ColdCountThreshold);
   filterAmbiguousProfile(ProfileMap);
+  if (MarkAllContextPreinlined)
+    markAllContextPreinlined(ProfileMap);
   calculateAndShowDensity(ProfileMap);
 }
 
-void ProfileGenerator::trimColdProfiles(const SampleProfileMap &Profiles,
-                                        uint64_t ColdCntThreshold) {
+void ProfileGenerator::trimColdProfiles(uint64_t ColdCntThreshold) {
   if (!TrimColdProfile)
     return;
 
@@ -543,6 +562,7 @@ void ProfileGenerator::generateLineNumBasedProfile() {
   populateBodySamplesForAllFunctions(SC.RangeCounter);
   // Fill in boundary sample counts as well as call site samples for calls
   populateBoundarySamplesForAllFunctions(SC.BranchCounter);
+  populateTypeSamplesForAllFunctions(SC.DataAccessCounter);
 
   updateFunctionSamples();
 }
@@ -609,8 +629,8 @@ void ProfileGenerator::populateBoundarySamplesWithProbesForAllFunctions(
           getLeafProfileAndAddTotalSamples(FrameVec, 0);
       FunctionProfile.addCalledTargetSamples(
           FrameVec.back().Location.LineOffset,
-          FrameVec.back().Location.Discriminator,
-          FunctionId(CalleeName), Count);
+          FrameVec.back().Location.Discriminator, FunctionId(CalleeName),
+          Count);
     }
   }
 }
@@ -633,8 +653,7 @@ FunctionSamples &ProfileGenerator::getLeafProfileAndAddTotalSamples(
         getBaseDiscriminator(FrameVec[I - 1].Location.Discriminator));
     FunctionSamplesMap &SamplesMap =
         FunctionProfile->functionSamplesAt(Callsite);
-    auto Ret =
-        SamplesMap.emplace(FrameVec[I].Func, FunctionSamples());
+    auto Ret = SamplesMap.emplace(FrameVec[I].Func, FunctionSamples());
     if (Ret.second) {
       SampleContext Context(FrameVec[I].Func);
       Ret.first->second.setContext(Context);
@@ -717,6 +736,14 @@ ProfileGeneratorBase::getCalleeNameForAddress(uint64_t TargetAddress) {
   if (!FRange || !FRange->IsFuncEntry)
     return StringRef();
 
+  // DWARF and symbol table may have mismatching function names. Instead, we'll
+  // try to use its pseudo probe name first.
+  if (Binary->usePseudoProbes()) {
+    auto FuncName = Binary->findPseudoProbeName(FRange->Func);
+    if (FuncName.size())
+      return FunctionSamples::getCanonicalFnName(FuncName);
+  }
+
   return FunctionSamples::getCanonicalFnName(FRange->getFuncName());
 }
 
@@ -746,6 +773,26 @@ void ProfileGenerator::populateBoundarySamplesForAllFunctions(
     FunctionSamples &CalleeProfile =
         getTopLevelFunctionProfile(FunctionId(CalleeName));
     CalleeProfile.addHeadSamples(Count);
+  }
+}
+
+void ProfileGenerator::populateTypeSamplesForAllFunctions(
+    const DataAccessSample &DataAccessSamples) {
+  // For each instruction with vtable accesses, get its symbolized inline
+  // stack, and add the vtable counters to the function samples.
+  for (const auto &[IpData, Count] : DataAccessSamples) {
+    uint64_t InstAddr = IpData.first;
+    const SampleContextFrameVector &FrameVec =
+        Binary->getCachedFrameLocationStack(InstAddr,
+                                            /* UseProbeDiscriminator= */ false);
+    if (!FrameVec.empty()) {
+      FunctionSamples &FunctionProfile =
+          getLeafProfileAndAddTotalSamples(FrameVec, /* Count= */ 0);
+      LineLocation Loc(
+          FrameVec.back().Location.LineOffset,
+          getBaseDiscriminator(FrameVec.back().Location.Discriminator));
+      FunctionProfile.addTypeSamplesAt(Loc, FunctionId(IpData.second), Count);
+    }
   }
 }
 
@@ -876,6 +923,8 @@ CSProfileGenerator::getOrCreateContextNode(const SampleContextFrames Context,
 }
 
 void CSProfileGenerator::generateProfile() {
+  NamedRegionTimer T("generate", "Generate CS profile", "profgen",
+                     "llvm-profgen", TimeProfGen);
   FunctionSamples::ProfileIsCS = true;
 
   collectProfiledFunctions();
@@ -884,6 +933,8 @@ void CSProfileGenerator::generateProfile() {
     Binary->decodePseudoProbe();
     if (InferMissingFrames)
       initializeMissingFrameInferrer();
+    if (LoadFunctionFromSymbol)
+      Binary->loadSymbolsFromPseudoProbe();
   }
 
   if (SampleCounters) {
@@ -1130,6 +1181,8 @@ void CSProfileGenerator::postProcessProfiles() {
     FunctionSamples::ProfileIsCS = false;
   }
   filterAmbiguousProfile(ProfileMap);
+  if (MarkAllContextPreinlined)
+    markAllContextPreinlined(ProfileMap);
   ProfileGeneratorBase::calculateAndShowDensity(ProfileMap);
 }
 
@@ -1242,8 +1295,7 @@ void CSProfileGenerator::populateBodySamplesWithProbes(
   // Extract the top frame probes by looking up each address among the range in
   // the Address2ProbeMap
   extractProbesFromRange(RangeCounter, ProbeCounter);
-  std::unordered_map<MCDecodedPseudoProbeInlineTree *,
-                     std::unordered_set<FunctionSamples *>>
+  DenseMap<MCDecodedPseudoProbeInlineTree *, SmallPtrSet<FunctionSamples *, 0>>
       FrameSamples;
   for (const auto &PI : ProbeCounter) {
     const MCDecodedPseudoProbe *Probe = PI.first;

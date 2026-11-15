@@ -14,11 +14,9 @@
 #include "DirectXMCTargetDesc.h"
 #include "DirectXContainerObjectWriter.h"
 #include "TargetInfo/DirectXTargetInfo.h"
-#include "llvm/MC/LaneBitmask.h"
 #include "llvm/MC/MCAsmBackend.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCCodeEmitter.h"
-#include "llvm/MC/MCDXContainerWriter.h"
 #include "llvm/MC/MCInstPrinter.h"
 #include "llvm/MC/MCInstrInfo.h"
 #include "llvm/MC/MCRegisterInfo.h"
@@ -94,7 +92,7 @@ public:
 class DirectXMCAsmInfo : public MCAsmInfo {
 public:
   explicit DirectXMCAsmInfo(const Triple &TT, const MCTargetOptions &Options)
-      : MCAsmInfo() {}
+      : MCAsmInfo(Options) {}
 };
 
 } // namespace
@@ -132,7 +130,8 @@ static MCRegisterInfo *createDirectXMCRegisterInfo(const Triple &Triple) {
 
 static MCInstrInfo *createDirectXMCInstrInfo() { return new MCInstrInfo(); }
 
-extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeDirectXTargetMC() {
+extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void
+LLVMInitializeDirectXTargetMC() {
   Target &T = getTheDirectXTarget();
   RegisterMCAsmInfo<DirectXMCAsmInfo> X(T);
   TargetRegistry::RegisterMCInstrInfo(T, createDirectXMCInstrInfo);

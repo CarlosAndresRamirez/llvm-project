@@ -14,6 +14,7 @@
 #include "lldb/API/SBFileSpec.h"
 #include "lldb/API/SBFormat.h"
 #include "lldb/API/SBFrame.h"
+#include "lldb/API/SBFrameList.h"
 #include "lldb/API/SBProcess.h"
 #include "lldb/API/SBStream.h"
 #include "lldb/API/SBStructuredData.h"
@@ -53,7 +54,7 @@ using namespace lldb_private;
 const char *SBThread::GetBroadcasterClassName() {
   LLDB_INSTRUMENT();
 
-  return ConstString(Thread::GetStaticBroadcasterClass()).AsCString();
+  return ConstString(Thread::GetStaticBroadcasterClass()).AsCString(nullptr);
 }
 
 // Constructors
@@ -157,52 +158,8 @@ size_t SBThread::GetStopReasonDataCount() {
   if (exe_ctx) {
     if (exe_ctx->HasThreadScope()) {
       StopInfoSP stop_info_sp = exe_ctx->GetThreadPtr()->GetStopInfo();
-      if (stop_info_sp) {
-        StopReason reason = stop_info_sp->GetStopReason();
-        switch (reason) {
-        case eStopReasonInvalid:
-        case eStopReasonNone:
-        case eStopReasonTrace:
-        case eStopReasonExec:
-        case eStopReasonPlanComplete:
-        case eStopReasonThreadExiting:
-        case eStopReasonInstrumentation:
-        case eStopReasonProcessorTrace:
-        case eStopReasonVForkDone:
-        case eStopReasonHistoryBoundary:
-          // There is no data for these stop reasons.
-          return 0;
-
-        case eStopReasonBreakpoint: {
-          break_id_t site_id = stop_info_sp->GetValue();
-          lldb::BreakpointSiteSP bp_site_sp(
-              exe_ctx->GetProcessPtr()->GetBreakpointSiteList().FindByID(
-                  site_id));
-          if (bp_site_sp)
-            return bp_site_sp->GetNumberOfConstituents() * 2;
-          else
-            return 0; // Breakpoint must have cleared itself...
-        } break;
-
-        case eStopReasonWatchpoint:
-          return 1;
-
-        case eStopReasonSignal:
-          return 1;
-
-        case eStopReasonInterrupt:
-          return 1;
-
-        case eStopReasonException:
-          return 1;
-
-        case eStopReasonFork:
-          return 1;
-
-        case eStopReasonVFork:
-          return 1;
-        }
-      }
+      if (stop_info_sp)
+        return stop_info_sp->GetStopReasonDataCount();
     }
   } else {
     LLDB_LOG_ERROR(GetLog(LLDBLog::API), exe_ctx.takeError(), "{0}");
@@ -220,63 +177,8 @@ uint64_t SBThread::GetStopReasonDataAtIndex(uint32_t idx) {
     if (exe_ctx->HasThreadScope()) {
       Thread *thread = exe_ctx->GetThreadPtr();
       StopInfoSP stop_info_sp = thread->GetStopInfo();
-      if (stop_info_sp) {
-        StopReason reason = stop_info_sp->GetStopReason();
-        switch (reason) {
-        case eStopReasonInvalid:
-        case eStopReasonNone:
-        case eStopReasonTrace:
-        case eStopReasonExec:
-        case eStopReasonPlanComplete:
-        case eStopReasonThreadExiting:
-        case eStopReasonInstrumentation:
-        case eStopReasonProcessorTrace:
-        case eStopReasonVForkDone:
-        case eStopReasonHistoryBoundary:
-          // There is no data for these stop reasons.
-          return 0;
-
-        case eStopReasonBreakpoint: {
-          break_id_t site_id = stop_info_sp->GetValue();
-          lldb::BreakpointSiteSP bp_site_sp(
-              exe_ctx->GetProcessPtr()->GetBreakpointSiteList().FindByID(
-                  site_id));
-          if (bp_site_sp) {
-            uint32_t bp_index = idx / 2;
-            BreakpointLocationSP bp_loc_sp(
-                bp_site_sp->GetConstituentAtIndex(bp_index));
-            if (bp_loc_sp) {
-              if (idx & 1) {
-                // Odd idx, return the breakpoint location ID
-                return bp_loc_sp->GetID();
-              } else {
-                // Even idx, return the breakpoint ID
-                return bp_loc_sp->GetBreakpoint().GetID();
-              }
-            }
-          }
-          return LLDB_INVALID_BREAK_ID;
-        } break;
-
-        case eStopReasonWatchpoint:
-          return stop_info_sp->GetValue();
-
-        case eStopReasonSignal:
-          return stop_info_sp->GetValue();
-
-        case eStopReasonInterrupt:
-          return stop_info_sp->GetValue();
-
-        case eStopReasonException:
-          return stop_info_sp->GetValue();
-
-        case eStopReasonFork:
-          return stop_info_sp->GetValue();
-
-        case eStopReasonVFork:
-          return stop_info_sp->GetValue();
-        }
-      }
+      if (stop_info_sp)
+        return stop_info_sp->GetStopReasonDataAtIndex(idx);
     }
   } else {
     LLDB_LOG_ERROR(GetLog(LLDBLog::API), exe_ctx.takeError(), "{0}");
@@ -338,11 +240,34 @@ SBThread::GetStopReasonExtendedBacktraces(InstrumentationRuntimeType type) {
   return threads;
 }
 
-size_t SBThread::GetStopDescription(char *dst, size_t dst_len) {
-  LLDB_INSTRUMENT_VA(this, dst, dst_len);
+bool SBThread::GetStopDescription(lldb::SBStream &stream) const {
+  LLDB_INSTRUMENT_VA(this, stream);
 
-  if (dst)
-    *dst = 0;
+  if (!m_opaque_sp)
+    return false;
+
+  llvm::Expected<StoppedExecutionContext> exe_ctx =
+      GetStoppedExecutionContext(m_opaque_sp);
+  if (!exe_ctx) {
+    LLDB_LOG_ERROR(GetLog(LLDBLog::API), exe_ctx.takeError(), "{0}");
+    return false;
+  }
+
+  if (!exe_ctx->HasThreadScope())
+    return false;
+
+  Stream &strm = stream.ref();
+  const std::string stop_desc = exe_ctx->GetThreadPtr()->GetStopDescription();
+  strm.PutCString(stop_desc);
+
+  return true;
+}
+
+size_t SBThread::GetStopDescription(char *dst_or_null, size_t dst_len) {
+  LLDB_INSTRUMENT_VA(this, dst_or_null, dst_len);
+
+  if (dst_or_null)
+    *dst_or_null = 0;
 
   llvm::Expected<StoppedExecutionContext> exe_ctx =
       GetStoppedExecutionContext(m_opaque_sp);
@@ -358,8 +283,8 @@ size_t SBThread::GetStopDescription(char *dst, size_t dst_len) {
   if (thread_stop_desc.empty())
     return 0;
 
-  if (dst)
-    return ::snprintf(dst, dst_len, "%s", thread_stop_desc.c_str()) + 1;
+  if (dst_or_null)
+    return ::snprintf(dst_or_null, dst_len, "%s", thread_stop_desc.c_str()) + 1;
 
   // NULL dst passed in, return the length needed to contain the
   // description.
@@ -394,6 +319,13 @@ void SBThread::SetThread(const ThreadSP &lldb_object_sp) {
 lldb::tid_t SBThread::GetThreadID() const {
   LLDB_INSTRUMENT_VA(this);
 
+  llvm::Expected<StoppedExecutionContext> exe_ctx =
+      GetStoppedExecutionContext(m_opaque_sp);
+  if (!exe_ctx) {
+    LLDB_LOG_ERROR(GetLog(LLDBLog::API), exe_ctx.takeError(), "{0}");
+    return LLDB_INVALID_THREAD_ID;
+  }
+
   ThreadSP thread_sp(m_opaque_sp->GetThreadSP());
   if (thread_sp)
     return thread_sp->GetID();
@@ -402,6 +334,13 @@ lldb::tid_t SBThread::GetThreadID() const {
 
 uint32_t SBThread::GetIndexID() const {
   LLDB_INSTRUMENT_VA(this);
+
+  llvm::Expected<StoppedExecutionContext> exe_ctx =
+      GetStoppedExecutionContext(m_opaque_sp);
+  if (!exe_ctx) {
+    LLDB_LOG_ERROR(GetLog(LLDBLog::API), exe_ctx.takeError(), "{0}");
+    return LLDB_INVALID_INDEX32;
+  }
 
   ThreadSP thread_sp(m_opaque_sp->GetThreadSP());
   if (thread_sp)
@@ -525,7 +464,8 @@ static Status ResumeNewPlan(StoppedExecutionContext exe_ctx,
   process->GetThreadList().SetSelectedThreadByID(thread->GetID());
 
   // Release the run lock but keep the API lock.
-  std::unique_lock<std::recursive_mutex> api_lock = exe_ctx.AllowResume();
+  TargetAPIMutex api_mutex = exe_ctx.AllowResume();
+  std::unique_lock<TargetAPIMutex> guard(api_mutex, std::adopt_lock);
   if (process->GetTarget().GetDebugger().GetAsyncExecution())
     return process->Resume();
   return process->ResumeSynchronous(nullptr);
@@ -556,11 +496,32 @@ void SBThread::StepOver(lldb::RunMode stop_other_threads, SBError &error) {
   Thread *thread = exe_ctx->GetThreadPtr();
   bool abort_other_plans = false;
   StackFrameSP frame_sp(thread->GetStackFrameAtIndex(0));
+  if (!frame_sp) {
+    error.SetErrorString("No frame to step over");
+    return;
+  }
 
-  Status new_plan_status;
   ThreadPlanSP new_plan_sp;
-  if (frame_sp) {
-    if (frame_sp->HasDebugInformation()) {
+  lldb::StepType step_type =
+      frame_sp->HasDebugInformation() || frame_sp->IsSynthetic()
+          ? eStepTypeOver
+          : eStepTypeTraceOver;
+
+  llvm::Expected<lldb::ThreadPlanSP> frame_plan_result =
+      frame_sp->GetThreadPlanForStepType(step_type);
+  if (auto llvm_err = frame_plan_result.takeError()) {
+    error.SetErrorStringWithFormat("scripted frame provider got an error "
+                                   "while constructing step plan: \"%s\"",
+                                   llvm::toString(std::move(llvm_err)).c_str());
+    return;
+  }
+  new_plan_sp = *frame_plan_result;
+
+  if (new_plan_sp) {
+    thread->QueueThreadPlan(new_plan_sp, false);
+  } else {
+    Status new_plan_status;
+    if (step_type == eStepTypeOver) {
       const LazyBool avoid_no_debug = eLazyBoolCalculate;
       SymbolContext sc(frame_sp->GetSymbolContext(eSymbolContextEverything));
       new_plan_sp = thread->QueueThreadPlanForStepOverRange(
@@ -610,31 +571,56 @@ void SBThread::StepInto(const char *target_name, uint32_t end_line,
   StackFrameSP frame_sp(thread->GetStackFrameAtIndex(0));
   ThreadPlanSP new_plan_sp;
   Status new_plan_status;
+  lldb::StepType step_type;
 
-  if (frame_sp && frame_sp->HasDebugInformation()) {
-    SymbolContext sc(frame_sp->GetSymbolContext(eSymbolContextEverything));
-    AddressRange range;
-    if (end_line == LLDB_INVALID_LINE_NUMBER)
-      range = sc.line_entry.range;
-    else {
-      llvm::Error err = sc.GetAddressRangeFromHereToEndLine(end_line, range);
-      if (err) {
-        error = Status::FromErrorString(llvm::toString(std::move(err)).c_str());
-        return;
-      }
+  if (frame_sp && (frame_sp->HasDebugInformation() || frame_sp->IsSynthetic()))
+    step_type = eStepTypeInto;
+  else
+    step_type = eStepTypeTrace;
+
+  // First see if the Frame has some special way to do this step:
+  if (frame_sp) {
+    llvm::Expected<lldb::ThreadPlanSP> frame_plan_result =
+        frame_sp->GetThreadPlanForStepType(step_type);
+    if (auto llvm_err = frame_plan_result.takeError()) {
+      error.SetErrorStringWithFormat(
+          "scripted frame provider got an error "
+          "while constructing step plan: \"%s\"",
+          llvm::toString(std::move(llvm_err)).c_str());
+      return;
     }
+    new_plan_sp = *frame_plan_result;
+  }
 
-    const LazyBool step_out_avoids_code_without_debug_info =
-        eLazyBoolCalculate;
-    const LazyBool step_in_avoids_code_without_debug_info =
-        eLazyBoolCalculate;
-    new_plan_sp = thread->QueueThreadPlanForStepInRange(
-        abort_other_plans, range, sc, target_name, stop_other_threads,
-        new_plan_status, step_in_avoids_code_without_debug_info,
-        step_out_avoids_code_without_debug_info);
+  if (new_plan_sp) {
+    thread->QueueThreadPlan(new_plan_sp, false);
   } else {
-    new_plan_sp = thread->QueueThreadPlanForStepSingleInstruction(
-        false, abort_other_plans, stop_other_threads, new_plan_status);
+    if (step_type == eStepTypeInto) {
+      SymbolContext sc(frame_sp->GetSymbolContext(eSymbolContextEverything));
+      AddressRange range;
+      if (end_line == LLDB_INVALID_LINE_NUMBER)
+        range = sc.line_entry.range;
+      else {
+        llvm::Error err = sc.GetAddressRangeFromHereToEndLine(end_line, range);
+        if (err) {
+          error =
+              Status::FromErrorString(llvm::toString(std::move(err)).c_str());
+          return;
+        }
+      }
+
+      const LazyBool step_out_avoids_code_without_debug_info =
+          eLazyBoolCalculate;
+      const LazyBool step_in_avoids_code_without_debug_info =
+          eLazyBoolCalculate;
+      new_plan_sp = thread->QueueThreadPlanForStepInRange(
+          abort_other_plans, range, sc, target_name, stop_other_threads,
+          new_plan_status, step_in_avoids_code_without_debug_info,
+          step_out_avoids_code_without_debug_info);
+    } else {
+      new_plan_sp = thread->QueueThreadPlanForStepSingleInstruction(
+          false, abort_other_plans, stop_other_threads, new_plan_status);
+    }
   }
 
   if (new_plan_status.Success())
@@ -668,13 +654,34 @@ void SBThread::StepOut(SBError &error) {
   bool abort_other_plans = false;
   bool stop_other_threads = false;
 
-  Thread *thread = exe_ctx->GetThreadPtr();
+  ThreadPlanSP new_plan_sp;
 
-  const LazyBool avoid_no_debug = eLazyBoolCalculate;
+  Thread *thread = exe_ctx->GetThreadPtr();
+  StackFrameSP frame_sp(thread->GetStackFrameAtIndex(0));
+  if (frame_sp) {
+    llvm::Expected<lldb::ThreadPlanSP> frame_plan_result =
+        frame_sp->GetThreadPlanForStepType(eStepTypeOut);
+    if (auto llvm_err = frame_plan_result.takeError()) {
+      error.SetErrorStringWithFormat(
+          "scripted frame provider got an error "
+          "while constructing step plan: \"%s\"",
+          llvm::toString(std::move(llvm_err)).c_str());
+      return;
+    }
+    new_plan_sp = *frame_plan_result;
+  }
+
   Status new_plan_status;
-  ThreadPlanSP new_plan_sp(thread->QueueThreadPlanForStepOut(
-      abort_other_plans, nullptr, false, stop_other_threads, eVoteYes,
-      eVoteNoOpinion, 0, new_plan_status, avoid_no_debug));
+  if (new_plan_sp) {
+    // FIXME: Carry over stop_other_threads, and avoid_no_debug to
+    // the new plan?
+    thread->QueueThreadPlan(new_plan_sp, false);
+  } else {
+    const LazyBool avoid_no_debug = eLazyBoolCalculate;
+    new_plan_sp = thread->QueueThreadPlanForStepOut(
+        abort_other_plans, nullptr, false, stop_other_threads, eVoteYes,
+        eVoteNoOpinion, 0, new_plan_status, avoid_no_debug);
+  }
 
   if (new_plan_status.Success())
     error = ResumeNewPlan(std::move(*exe_ctx), new_plan_sp.get());
@@ -753,9 +760,28 @@ void SBThread::StepInstruction(bool step_over, SBError &error) {
   }
 
   Thread *thread = exe_ctx->GetThreadPtr();
+  StackFrameSP frame_sp(thread->GetStackFrameAtIndex(0));
+  lldb::StepType step_type = step_over ? eStepTypeTraceOver : eStepTypeTrace;
+
+  ThreadPlanSP new_plan_sp;
+
+  if (frame_sp) {
+    llvm::Expected<lldb::ThreadPlanSP> frame_plan_result =
+        frame_sp->GetThreadPlanForStepType(step_type);
+    if (auto llvm_err = frame_plan_result.takeError()) {
+      error.SetErrorStringWithFormat(
+          "scripted frame provider got an error "
+          "while constructing step plan: \"%s\"",
+          llvm::toString(std::move(llvm_err)).c_str());
+      return;
+    }
+    new_plan_sp = *frame_plan_result;
+  }
+
   Status new_plan_status;
-  ThreadPlanSP new_plan_sp(thread->QueueThreadPlanForStepSingleInstruction(
-      step_over, false, true, new_plan_status));
+  if (!new_plan_sp)
+    new_plan_sp = thread->QueueThreadPlanForStepSingleInstruction(
+        step_over, false, true, new_plan_status);
 
   if (new_plan_status.Success())
     error = ResumeNewPlan(std::move(*exe_ctx), new_plan_sp.get());
@@ -807,7 +833,6 @@ SBError SBThread::StepOverUntil(lldb::SBFrame &sb_frame,
   LLDB_INSTRUMENT_VA(this, sb_frame, sb_file_spec, line);
 
   SBError sb_error;
-  char path[PATH_MAX];
 
   llvm::Expected<StoppedExecutionContext> exe_ctx =
       GetStoppedExecutionContext(m_opaque_sp);
@@ -817,7 +842,6 @@ SBError SBThread::StepOverUntil(lldb::SBFrame &sb_frame,
   StackFrameSP frame_sp(sb_frame.GetFrameSP());
 
   if (exe_ctx->HasThreadScope()) {
-    Target *target = exe_ctx->GetTargetPtr();
     Thread *thread = exe_ctx->GetThreadPtr();
 
     if (line == 0) {
@@ -866,57 +890,22 @@ SBError SBThread::StepOverUntil(lldb::SBFrame &sb_frame,
       }
     }
 
-    // Grab the current function, then we will make sure the "until" address is
-    // within the function.  We discard addresses that are out of the current
-    // function, and then if there are no addresses remaining, give an
-    // appropriate error message.
-
-    bool all_in_function = true;
-
-    std::vector<addr_t> step_over_until_addrs;
     const bool abort_other_plans = false;
     const bool stop_other_threads = false;
-    // TODO: Handle SourceLocationSpec column information
-    SourceLocationSpec location_spec(
-        step_file_spec, line, /*column=*/std::nullopt, /*check_inlines=*/true,
-        /*exact_match=*/false);
+    llvm::Expected<std::vector<addr_t>> step_over_until_addrs =
+        GetStepUntilAddresses(*frame_sp, step_file_spec, {line}, {});
+    if (!step_over_until_addrs)
+      return Status::FromError(step_over_until_addrs.takeError());
 
-    SymbolContextList sc_list;
-    frame_sc.comp_unit->ResolveSymbolContext(location_spec,
-                                             eSymbolContextLineEntry, sc_list);
-    for (const SymbolContext &sc : sc_list) {
-      addr_t step_addr =
-          sc.line_entry.range.GetBaseAddress().GetLoadAddress(target);
-      if (step_addr != LLDB_INVALID_ADDRESS) {
-        AddressRange unused_range;
-        if (frame_sc.function->GetRangeContainingLoadAddress(step_addr, *target,
-                                                             unused_range))
-          step_over_until_addrs.push_back(step_addr);
-        else
-          all_in_function = false;
-      }
-    }
+    Status new_plan_status;
+    ThreadPlanSP new_plan_sp = thread->QueueThreadPlanForStepUntil(
+        abort_other_plans, *step_over_until_addrs, stop_other_threads,
+        frame_sp->GetFrameIndex(), new_plan_status);
 
-    if (step_over_until_addrs.empty()) {
-      if (all_in_function) {
-        step_file_spec.GetPath(path, sizeof(path));
-        sb_error = Status::FromErrorStringWithFormat(
-            "No line entries for %s:%u", path, line);
-      } else
-        sb_error = Status::FromErrorString(
-            "step until target not in current function");
-    } else {
-      Status new_plan_status;
-      ThreadPlanSP new_plan_sp(thread->QueueThreadPlanForStepUntil(
-          abort_other_plans, &step_over_until_addrs[0],
-          step_over_until_addrs.size(), stop_other_threads,
-          frame_sp->GetFrameIndex(), new_plan_status));
-
-      if (new_plan_status.Success())
-        sb_error = ResumeNewPlan(std::move(*exe_ctx), new_plan_sp.get());
-      else
-        sb_error = Status::FromErrorString(new_plan_status.AsCString());
-    }
+    if (new_plan_status.Success())
+      sb_error = ResumeNewPlan(std::move(*exe_ctx), new_plan_sp.get());
+    else
+      sb_error = Status::FromErrorString(new_plan_status.AsCString());
   } else {
     sb_error = Status::FromErrorString("this SBThread object is invalid");
   }
@@ -959,8 +948,13 @@ SBError SBThread::StepUsingScriptedThreadPlan(const char *script_class_name,
   Status new_plan_status;
   StructuredData::ObjectSP obj_sp = args_data.m_impl_up->GetObjectSP();
 
+  StructuredData::DictionarySP args_dict_sp;
+  if (obj_sp && obj_sp->GetType() == lldb::eStructuredDataTypeDictionary)
+    args_dict_sp = std::static_pointer_cast<StructuredData::Dictionary>(obj_sp);
+
+  ScriptedMetadata scripted_metadata(script_class_name, args_dict_sp);
   ThreadPlanSP new_plan_sp = thread->QueueThreadPlanForStepScripted(
-      false, script_class_name, obj_sp, false, new_plan_status);
+      false, scripted_metadata, false, new_plan_status);
 
   if (new_plan_status.Fail()) {
     error = Status::FromErrorString(new_plan_status.AsCString());
@@ -1178,6 +1172,26 @@ SBFrame SBThread::GetFrameAtIndex(uint32_t idx) {
   return sb_frame;
 }
 
+lldb::SBFrameList SBThread::GetFrames() const {
+  LLDB_INSTRUMENT_VA(this);
+
+  SBFrameList sb_frame_list;
+  llvm::Expected<StoppedExecutionContext> exe_ctx =
+      GetStoppedExecutionContext(m_opaque_sp);
+  if (!exe_ctx) {
+    LLDB_LOG_ERROR(GetLog(LLDBLog::API), exe_ctx.takeError(), "{0}");
+    return SBFrameList();
+  }
+
+  if (exe_ctx->HasThreadScope()) {
+    StackFrameListSP frame_list_sp =
+        exe_ctx->GetThreadPtr()->GetStackFrameList();
+    sb_frame_list.SetFrameList(frame_list_sp);
+  }
+
+  return sb_frame_list;
+}
+
 lldb::SBFrame SBThread::GetSelectedFrame() {
   LLDB_INSTRUMENT_VA(this);
 
@@ -1370,6 +1384,13 @@ SBThread SBThread::GetExtendedBacktraceThread(const char *type) {
 uint32_t SBThread::GetExtendedBacktraceOriginatingIndexID() {
   LLDB_INSTRUMENT_VA(this);
 
+  llvm::Expected<StoppedExecutionContext> exe_ctx =
+      GetStoppedExecutionContext(m_opaque_sp);
+  if (!exe_ctx) {
+    LLDB_LOG_ERROR(GetLog(LLDBLog::API), exe_ctx.takeError(), "{0}");
+    return LLDB_INVALID_INDEX32;
+  }
+
   ThreadSP thread_sp(m_opaque_sp->GetThreadSP());
   if (thread_sp)
     return thread_sp->GetExtendedBacktraceOriginatingIndexID();
@@ -1378,6 +1399,13 @@ uint32_t SBThread::GetExtendedBacktraceOriginatingIndexID() {
 
 SBValue SBThread::GetCurrentException() {
   LLDB_INSTRUMENT_VA(this);
+
+  llvm::Expected<StoppedExecutionContext> exe_ctx =
+      GetStoppedExecutionContext(m_opaque_sp);
+  if (!exe_ctx) {
+    LLDB_LOG_ERROR(GetLog(LLDBLog::API), exe_ctx.takeError(), "{0}");
+    return SBValue();
+  }
 
   ThreadSP thread_sp(m_opaque_sp->GetThreadSP());
   if (!thread_sp)
@@ -1389,6 +1417,13 @@ SBValue SBThread::GetCurrentException() {
 SBThread SBThread::GetCurrentExceptionBacktrace() {
   LLDB_INSTRUMENT_VA(this);
 
+  llvm::Expected<StoppedExecutionContext> exe_ctx =
+      GetStoppedExecutionContext(m_opaque_sp);
+  if (!exe_ctx) {
+    LLDB_LOG_ERROR(GetLog(LLDBLog::API), exe_ctx.takeError(), "{0}");
+    return SBThread();
+  }
+
   ThreadSP thread_sp(m_opaque_sp->GetThreadSP());
   if (!thread_sp)
     return SBThread();
@@ -1398,6 +1433,13 @@ SBThread SBThread::GetCurrentExceptionBacktrace() {
 
 bool SBThread::SafeToCallFunctions() {
   LLDB_INSTRUMENT_VA(this);
+
+  llvm::Expected<StoppedExecutionContext> exe_ctx =
+      GetStoppedExecutionContext(m_opaque_sp);
+  if (!exe_ctx) {
+    LLDB_LOG_ERROR(GetLog(LLDBLog::API), exe_ctx.takeError(), "{0}");
+    return false;
+  }
 
   ThreadSP thread_sp(m_opaque_sp->GetThreadSP());
   if (thread_sp)
@@ -1417,6 +1459,13 @@ lldb_private::Thread *SBThread::get() {
 
 SBValue SBThread::GetSiginfo() {
   LLDB_INSTRUMENT_VA(this);
+
+  llvm::Expected<StoppedExecutionContext> exe_ctx =
+      GetStoppedExecutionContext(m_opaque_sp);
+  if (!exe_ctx) {
+    LLDB_LOG_ERROR(GetLog(LLDBLog::API), exe_ctx.takeError(), "{0}");
+    return SBValue();
+  }
 
   ThreadSP thread_sp = m_opaque_sp->GetThreadSP();
   if (!thread_sp)

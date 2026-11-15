@@ -18,8 +18,8 @@ TEST(LlvmLibcStrsepTest, NullSrc) {
 TEST(LlvmLibcStrsepTest, NoTokenFound) {
   {
     char s[] = "";
-    char *string = s;
-    EXPECT_STREQ(LIBC_NAMESPACE::strsep(&string, ""), nullptr);
+    char *string = s, *orig = s;
+    EXPECT_STREQ(LIBC_NAMESPACE::strsep(&string, ""), orig);
     EXPECT_TRUE(string == nullptr);
   }
   {
@@ -59,6 +59,14 @@ TEST(LlvmLibcStrsepTest, SubsequentSearchesReturnNull) {
   ASSERT_STREQ(LIBC_NAMESPACE::strsep(&string, ":"), "a");
   ASSERT_EQ(LIBC_NAMESPACE::strsep(&string, ":"), nullptr);
   ASSERT_EQ(LIBC_NAMESPACE::strsep(&string, ":"), nullptr);
+}
+
+TEST(LlvmLibcStrsepTest, TopBitSet) {
+  char top_bit_set_str[] = "hello\x80world";
+  char *p = top_bit_set_str;
+  ASSERT_STREQ(LIBC_NAMESPACE::strsep(&p, "\x80"), "hello");
+  ASSERT_STREQ(LIBC_NAMESPACE::strsep(&p, "\x80"), "world");
+  ASSERT_EQ(LIBC_NAMESPACE::strsep(&p, "\x80"), nullptr);
 }
 
 #if defined(LIBC_ADD_NULL_CHECKS)

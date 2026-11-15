@@ -11,7 +11,7 @@
 #include "clang/Basic/DiagnosticDriver.h"
 #include "clang/Driver/CommonArgs.h"
 #include "clang/Driver/Driver.h"
-#include "clang/Driver/Options.h"
+#include "clang/Options/Options.h"
 #include "llvm/TargetParser/Host.h"
 #include "llvm/TargetParser/LoongArchTargetParser.h"
 
@@ -108,6 +108,22 @@ StringRef loongarch::getLoongArchABI(const Driver &D, const ArgList &Args,
   case llvm::Triple::GNUF32:
   case llvm::Triple::MuslF32:
     return IsLA32 ? "ilp32f" : "lp64f";
+  case llvm::Triple::UnknownEnvironment: {
+    // Without an environment, the triple implies no ABI. Use the widest
+    // floating-point ABI that the architecture's FPU supports, which is also
+    // what the backend picks when it is given no ABI.
+    std::string ArchName;
+    if (const Arg *A = Args.getLastArg(options::OPT_march_EQ))
+      ArchName = A->getValue();
+    std::vector<StringRef> ArchFeatures;
+    llvm::LoongArch::getArchFeatures(
+        postProcessTargetCPUString(ArchName, Triple), ArchFeatures);
+    if (llvm::is_contained(ArchFeatures, "+d"))
+      return IsLA32 ? "ilp32d" : "lp64d";
+    if (llvm::is_contained(ArchFeatures, "+f"))
+      return IsLA32 ? "ilp32f" : "lp64f";
+    return IsLA32 ? "ilp32s" : "lp64s";
+  }
   case llvm::Triple::GNUF64:
     // This was originally permitted (and indeed the canonical way) to
     // represent the {ILP32,LP64}D ABIs, but in Feb 2023 Loongson decided to
@@ -130,27 +146,16 @@ void loongarch::getLoongArchTargetFeatures(const Driver &D,
                                            const ArgList &Args,
                                            std::vector<StringRef> &Features) {
   // Enable the `lsx` feature on 64-bit LoongArch by default.
-  if (Triple.isLoongArch64() &&
-      (!Args.hasArgNoClaim(clang::driver::options::OPT_march_EQ)))
+  if (Triple.isLoongArch64() && (!Args.hasArgNoClaim(options::OPT_march_EQ)))
     Features.push_back("+lsx");
 
-  // FIXME: Now we must use -mrelax to enable relax, maybe -mrelax will be set
-  // as default in the future.
-  if (const Arg *A =
-          Args.getLastArg(options::OPT_mrelax, options::OPT_mno_relax)) {
-    if (A->getOption().matches(options::OPT_mrelax)) {
-      Features.push_back("+relax");
-      // -gsplit-dwarf -mrelax requires DW_AT_high_pc/DW_AT_ranges/... indexing
-      // into .debug_addr, which is currently not implemented.
-      Arg *A;
-      if (getDebugFissionKind(D, Args, A) != DwarfFissionKind::None)
-        D.Diag(
-            clang::diag::err_drv_loongarch_unsupported_with_linker_relaxation)
-            << A->getAsString(Args);
-    } else {
-      Features.push_back("-relax");
-    }
-  }
+  // -mrelax is default, unless -mno-relax is specified.
+  // FIXME: Only for loongarch64, loongarch32 has not been fully verified.
+  if (Args.hasFlag(options::OPT_mrelax, options::OPT_mno_relax,
+                   Triple.isLoongArch64() ? true : false))
+    Features.push_back("+relax");
+  else if (Args.getLastArg(options::OPT_mno_relax))
+    Features.push_back("-relax");
 
   std::string ArchName;
   const Arg *MArch = Args.getLastArg(options::OPT_march_EQ);
@@ -310,7 +315,8 @@ std::string loongarch::getLoongArchTargetCPU(const llvm::opt::ArgList &Args,
   // If we have -march, use that.
   if (const Arg *A = Args.getLastArg(options::OPT_march_EQ)) {
     Arch = A->getValue();
-    if (Arch == "la64v1.0" || Arch == "la64v1.1")
+    if (Arch == "la64v1.0" || Arch == "la64v1.1" || Arch == "la32v1.0" ||
+        Arch == "la32rv1.0")
       CPU = llvm::LoongArch::getDefaultArch(Triple.isLoongArch64());
     else
       CPU = Arch;

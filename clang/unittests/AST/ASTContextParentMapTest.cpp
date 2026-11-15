@@ -49,6 +49,20 @@ TEST(GetParents, ReturnsParentForNestedNameSpecifierLoc) {
                              nestedNameSpecifierLoc(hasParent(typeLoc()))));
 }
 
+TEST(GetParents, ReturnsParentForObjCProtocolLoc) {
+  auto AST = tooling::buildASTFromCodeWithArgs(
+      "@protocol P @end @interface I <P> @end", {"-x", "objective-c"});
+  ASTContext &Ctx = AST->getASTContext();
+  auto Matches = match(objcInterfaceDecl(hasName("I")).bind("i"), Ctx);
+  ASSERT_EQ(Matches.size(), 1u);
+  const auto *I = Matches[0].getNodeAs<ObjCInterfaceDecl>("i");
+
+  ObjCProtocolLoc ProtocolLoc(*I->protocol_begin(), *I->protocol_loc_begin());
+  auto Parents = Ctx.getParents(ProtocolLoc);
+  ASSERT_EQ(Parents.size(), 1u);
+  EXPECT_EQ(Parents[0].get<ObjCInterfaceDecl>(), I);
+}
+
 TEST(GetParents, ReturnsParentInsideTemplateInstantiations) {
   MatchVerifier<Decl> DeclVerifier;
   EXPECT_TRUE(DeclVerifier.match(
@@ -132,8 +146,7 @@ TEST(GetParents, FriendTypeLoc) {
   TypeLoc FrALoc = FrA.getFriendType()->getTypeLoc();
   TypeLoc FrBLoc = FrB.getFriendType()->getTypeLoc();
   bool FrAOwnsTag = FrALoc.getTypePtr()->getAs<TagType>()->isTagOwned();
-  TagDecl *FrATagDecl =
-      FrALoc.getTypePtr()->getAs<TagType>()->getOriginalDecl();
+  TagDecl *FrATagDecl = FrALoc.getTypePtr()->getAs<TagType>()->getDecl();
   bool FrBOwnsTag = FrBLoc.getTypePtr()->getAs<TagType>()->isTagOwned();
 
   EXPECT_THAT(Ctx.getParents(A), ElementsAre(DynTypedNode::create(TU)));

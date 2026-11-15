@@ -60,9 +60,8 @@ define void @min_iters_known_via_loop_guards_add(i32 %start, i32 %end, ptr %src)
 ; CHECK-NEXT:    call void @llvm.assume(i1 [[PRE]])
 ; CHECK-NEXT:    [[ADD_1:%.*]] = add i32 [[SUB]], 1
 ; CHECK-NEXT:    [[IV_START:%.*]] = zext i32 [[ADD_1]] to i64
-; CHECK-NEXT:    [[TMP0:%.*]] = sub i64 101, [[IV_START]]
-; CHECK-NEXT:    [[MIN_ITERS_CHECK:%.*]] = icmp ult i64 [[TMP0]], 4
-; CHECK-NEXT:    br i1 [[MIN_ITERS_CHECK]], [[SCALAR_PH:label %.*]], label %[[VECTOR_PH:.*]]
+; CHECK-NEXT:    [[TMP0:%.*]] = sub nsw i64 101, [[IV_START]]
+; CHECK-NEXT:    br label %[[VECTOR_PH:.*]]
 ; CHECK:       [[VECTOR_PH]]:
 ;
 ; UNROLL-LABEL: define void @min_iters_known_via_loop_guards_add(
@@ -73,9 +72,8 @@ define void @min_iters_known_via_loop_guards_add(i32 %start, i32 %end, ptr %src)
 ; UNROLL-NEXT:    call void @llvm.assume(i1 [[PRE]])
 ; UNROLL-NEXT:    [[ADD_1:%.*]] = add i32 [[SUB]], 1
 ; UNROLL-NEXT:    [[IV_START:%.*]] = zext i32 [[ADD_1]] to i64
-; UNROLL-NEXT:    [[TMP0:%.*]] = sub i64 101, [[IV_START]]
-; UNROLL-NEXT:    [[MIN_ITERS_CHECK:%.*]] = icmp ult i64 [[TMP0]], 8
-; UNROLL-NEXT:    br i1 [[MIN_ITERS_CHECK]], [[SCALAR_PH:label %.*]], label %[[VECTOR_PH:.*]]
+; UNROLL-NEXT:    [[TMP0:%.*]] = sub nsw i64 101, [[IV_START]]
+; UNROLL-NEXT:    br label %[[VECTOR_PH:.*]]
 ; UNROLL:       [[VECTOR_PH]]:
 ;
 entry:

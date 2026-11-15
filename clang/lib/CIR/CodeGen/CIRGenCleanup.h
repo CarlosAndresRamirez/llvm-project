@@ -15,18 +15,32 @@
 #define CLANG_LIB_CIR_CODEGEN_CIRGENCLEANUP_H
 
 #include "Address.h"
+#include "CIRGenModule.h"
 #include "EHScopeStack.h"
 #include "mlir/IR/Value.h"
+#include "clang/AST/StmtCXX.h"
+#include "clang/CodeGenUtils/EHPersonality.h"
 
 namespace clang::CIRGen {
 
+/// The MS C++ ABI needs a pointer to RTTI data plus some flags to describe the
+/// type of a catch handler, so we use this wrapper.
+struct CatchTypeInfo {
+  mlir::TypedAttr rtti;
+  unsigned flags;
+};
+
 /// A protected scope for zero-cost EH handling.
 class EHScope {
+  EHScopeStack::stable_iterator enclosingEHScope;
+
   class CommonBitFields {
     friend class EHScope;
     unsigned kind : 3;
   };
   enum { NumCommonBits = 3 };
+
+  bool scopeMayThrow;
 
 protected:
   class CleanupBitFields {
@@ -62,16 +76,46 @@ protected:
   };
 
 public:
-  enum Kind { Cleanup, Catch, Terminate, Filter };
+  enum Kind { Cleanup, Terminate, Filter };
 
-  EHScope(Kind kind) { commonBits.kind = kind; }
+  EHScope(Kind kind, EHScopeStack::stable_iterator enclosingEHScope)
+      : enclosingEHScope(enclosingEHScope) {
+    commonBits.kind = kind;
+  }
 
   Kind getKind() const { return static_cast<Kind>(commonBits.kind); }
+
+  bool mayThrow() const {
+    // Traditional LLVM codegen also checks for `!block->use_empty()`, but
+    // in CIRGen the block content is not important, just used as a way to
+    // signal `hasEHBranches`.
+    return scopeMayThrow;
+  }
+
+  void setMayThrow(bool mayThrow) { scopeMayThrow = mayThrow; }
+
+  EHScopeStack::stable_iterator getEnclosingEHScope() const {
+    return enclosingEHScope;
+  }
 };
 
 /// A cleanup scope which generates the cleanup blocks lazily.
 class alignas(EHScopeStack::ScopeStackAlignment) EHCleanupScope
     : public EHScope {
+  /// The nearest normal cleanup scope enclosing this one.
+  EHScopeStack::stable_iterator enclosingNormal;
+
+  /// The dual entry/exit block along the normal edge.  This is lazily
+  /// created if needed before the cleanup is popped.
+  mlir::Block *normalBlock = nullptr;
+
+  /// An optional boolean variable indicating whether this cleanup has been
+  /// activated yet.
+  Address activeFlag = Address::invalid();
+
+  /// Cleanup scope op that represent the current scope in CIR
+  cir::CleanupScopeOp cleanupScopeOp;
+
 public:
   /// Gets the size required for a lazy cleanup scope with the given
   /// cleanup-data requirements.
@@ -83,11 +127,14 @@ public:
     return sizeof(EHCleanupScope) + cleanupBits.cleanupSize;
   }
 
-  EHCleanupScope(unsigned cleanupSize) : EHScope(EHScope::Cleanup) {
-    // TODO(cir): When exception handling is upstreamed, isNormalCleanup and
-    // isEHCleanup will be arguments to the constructor.
-    cleanupBits.isNormalCleanup = true;
-    cleanupBits.isEHCleanup = false;
+  EHCleanupScope(bool isNormal, bool isEH, unsigned cleanupSize,
+                 cir::CleanupScopeOp cleanupScopeOp,
+                 EHScopeStack::stable_iterator enclosingNormal,
+                 EHScopeStack::stable_iterator enclosingEH)
+      : EHScope(EHScope::Cleanup, enclosingEH),
+        enclosingNormal(enclosingNormal), cleanupScopeOp(cleanupScopeOp) {
+    cleanupBits.isNormalCleanup = isNormal;
+    cleanupBits.isEHCleanup = isEH;
     cleanupBits.isActive = true;
     cleanupBits.isLifetimeMarker = false;
     cleanupBits.testFlagInNormalCleanup = false;
@@ -101,9 +148,39 @@ public:
   // Objects of EHCleanupScope are not destructed. Use destroy().
   ~EHCleanupScope() = delete;
 
+  mlir::Block *getNormalBlock() const { return normalBlock; }
+  void setNormalBlock(mlir::Block *bb) { normalBlock = bb; }
+
   bool isNormalCleanup() const { return cleanupBits.isNormalCleanup; }
+  bool isEHCleanup() const { return cleanupBits.isEHCleanup; }
 
   bool isActive() const { return cleanupBits.isActive; }
+  void setActive(bool isActive) { cleanupBits.isActive = isActive; }
+
+  bool isLifetimeMarker() const { return cleanupBits.isLifetimeMarker; }
+  void setLifetimeMarker() { cleanupBits.isLifetimeMarker = true; }
+
+  bool hasActiveFlag() const { return activeFlag.isValid(); }
+  Address getActiveFlag() const { return activeFlag; }
+  void setActiveFlag(Address var) { activeFlag = var; }
+
+  void setTestFlagInNormalCleanup(bool value) {
+    cleanupBits.testFlagInNormalCleanup = value;
+  }
+  bool shouldTestFlagInNormalCleanup() const {
+    return cleanupBits.testFlagInNormalCleanup;
+  }
+
+  void setTestFlagInEHCleanup(bool value) {
+    cleanupBits.testFlagInEHCleanup = value;
+  }
+  bool shouldTestFlagInEHCleanup() const {
+    return cleanupBits.testFlagInEHCleanup;
+  }
+
+  EHScopeStack::stable_iterator getEnclosingNormalCleanup() const {
+    return enclosingNormal;
+  }
 
   size_t getCleanupSize() const { return cleanupBits.cleanupSize; }
   void *getCleanupBuffer() { return this + 1; }
@@ -111,6 +188,8 @@ public:
   EHScopeStack::Cleanup *getCleanup() {
     return reinterpret_cast<EHScopeStack::Cleanup *>(getCleanupBuffer());
   }
+
+  cir::CleanupScopeOp getCleanupScopeOp() { return cleanupScopeOp; }
 
   static bool classof(const EHScope *scope) {
     return (scope->getKind() == Cleanup);
@@ -131,12 +210,58 @@ public:
 
   EHScope *get() const { return reinterpret_cast<EHScope *>(ptr); }
 
+  EHScope *operator->() const { return get(); }
   EHScope &operator*() const { return *get(); }
+
+  iterator &operator++() {
+    size_t size;
+    switch (get()->getKind()) {
+    case EHScope::Filter:
+      llvm_unreachable("EHScopeStack::iterator Filter");
+      break;
+
+    case EHScope::Cleanup:
+      size = static_cast<const EHCleanupScope *>(get())->getAllocatedSize();
+      break;
+
+    case EHScope::Terminate:
+      llvm_unreachable("EHScopeStack::iterator Terminate");
+      break;
+    }
+    ptr += llvm::alignTo(size, ScopeStackAlignment);
+    return *this;
+  }
+
+  bool operator==(iterator other) const { return ptr == other.ptr; }
+  bool operator!=(iterator other) const { return ptr != other.ptr; }
 };
 
 inline EHScopeStack::iterator EHScopeStack::begin() const {
   return iterator(startOfData);
 }
+
+inline EHScopeStack::iterator EHScopeStack::end() const {
+  return iterator(endOfBuffer);
+}
+
+inline EHScopeStack::iterator
+EHScopeStack::find(stable_iterator savePoint) const {
+  assert(savePoint.isValid() && "finding invalid savepoint");
+  assert(savePoint.size <= stable_begin().size &&
+         "finding savepoint after pop");
+  return iterator(endOfBuffer - savePoint.size);
+}
+
+using CodeGenUtils::EHPersonality;
+
+/// Selects the personality function to use for \p fd, or for the translation
+/// unit as a whole when \p fd is null.
+const EHPersonality &getEHPersonality(CIRGenModule &cgm,
+                                      const clang::FunctionDecl *fd);
+
+/// Selects the personality function to use for the function currently being
+/// emitted.
+const EHPersonality &getEHPersonality(CIRGenFunction &cgf);
 
 } // namespace clang::CIRGen
 #endif // CLANG_LIB_CIR_CODEGEN_CIRGENCLEANUP_H

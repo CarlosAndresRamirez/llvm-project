@@ -150,6 +150,7 @@ protected:
     case MMLA::Nop:
       llvm_unreachable("Uninitialized operation type");
     }
+    llvm_unreachable("Unknown MMLA");
   }
 
   // Check common preconditions for applying the patterns and initialize
@@ -158,13 +159,11 @@ protected:
                              PatternRewriter &rewriter) {
     // Check iterator types for matrix multiplication.
     SmallVector<vector::IteratorType> itTypes = op.getIteratorTypesArray();
-    if (!((itTypes.size() == 3 &&
-           (itTypes[0] == vector::IteratorType::parallel &&
-            itTypes[1] == vector::IteratorType::parallel &&
-            itTypes[2] == vector::IteratorType::reduction)) ||
-          (itTypes.size() == 2 &&
-           (itTypes[0] == vector::IteratorType::parallel &&
-            itTypes[1] == vector::IteratorType::reduction))))
+    if ((itTypes.size() != 3 || itTypes[0] != vector::IteratorType::parallel ||
+         itTypes[1] != vector::IteratorType::parallel ||
+         itTypes[2] != vector::IteratorType::reduction) &&
+        (itTypes.size() != 2 || itTypes[0] != vector::IteratorType::parallel ||
+         itTypes[1] != vector::IteratorType::reduction))
       return rewriter.notifyMatchFailure(
           op, "iterator types do not correspond to matrix multiplication");
 
@@ -396,7 +395,7 @@ public:
                                  rewriter);
 
     // Initialize parameters for unrolling.
-    iterationBounds = *op.getShapeForUnroll();
+    iterationBounds = *op.getIterationShapeToUnroll();
     if (iterationBounds.size() == 3)
       subTileShape = SmallVector<int64_t>({dimM == 1 ? 1 : 2, 2, 8});
     else
@@ -437,7 +436,7 @@ public:
     acc = op.getAcc();
 
     // Initialize parameters for unrolling.
-    iterationBounds = *op.getShapeForUnroll();
+    iterationBounds = *op.getIterationShapeToUnroll();
     if (iterationBounds.size() == 3)
       subTileShape = SmallVector<int64_t>({dimM == 1 ? 1 : 2, 2, 4});
     else
@@ -455,9 +454,12 @@ public:
 class LowerContractionToNeonI8MMPattern
     : public OpRewritePattern<vector::ContractionOp> {
 public:
-  using OpRewritePattern::OpRewritePattern;
+  using Base::Base;
   LogicalResult matchAndRewrite(vector::ContractionOp op,
                                 PatternRewriter &rewriter) const override {
+    if (cast<vector::MaskableOpInterface>(op.getOperation()).isMasked())
+      return rewriter.notifyMatchFailure(
+          op, "masked contractions are not supported");
 
     VectorContractRewriterI8MM vcr;
     if (failed(vcr.matchAndInit(op, rewriter)))
@@ -471,9 +473,12 @@ public:
 class LowerContractionToNeonBFMMLAPattern
     : public OpRewritePattern<vector::ContractionOp> {
 public:
-  using OpRewritePattern::OpRewritePattern;
+  using Base::Base;
   LogicalResult matchAndRewrite(vector::ContractionOp op,
                                 PatternRewriter &rewriter) const override {
+    if (cast<vector::MaskableOpInterface>(op.getOperation()).isMasked())
+      return rewriter.notifyMatchFailure(
+          op, "masked contractions are not supported");
 
     VectorContractRewriterBFMMLA vcr;
     if (failed(vcr.matchAndInit(op, rewriter)))

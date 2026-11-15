@@ -46,8 +46,8 @@ class SlotIndexes;
 class StringRef;
 class raw_ostream;
 class LiveIntervals;
-class LiveVariables;
-class TargetRegisterClass;
+class MCRegisterClass;
+using TargetRegisterClass = MCRegisterClass;
 class TargetRegisterInfo;
 
 // This structure uniquely identifies a basic block section.
@@ -85,12 +85,6 @@ template <> struct DenseMapInfo<MBBSectionID> {
   using TypeInfo = DenseMapInfo<MBBSectionID::SectionType>;
   using NumberInfo = DenseMapInfo<unsigned>;
 
-  static inline MBBSectionID getEmptyKey() {
-    return MBBSectionID(NumberInfo::getEmptyKey());
-  }
-  static inline MBBSectionID getTombstoneKey() {
-    return MBBSectionID(NumberInfo::getTombstoneKey());
-  }
   static unsigned getHashValue(const MBBSectionID &SecID) {
     return detail::combineHashValue(TypeInfo::getHashValue(SecID.Type),
                                     NumberInfo::getHashValue(SecID.Number));
@@ -129,8 +123,10 @@ public:
     MCRegister PhysReg;
     LaneBitmask LaneMask;
 
-    RegisterMaskPair(MCPhysReg PhysReg, LaneBitmask LaneMask)
-        : PhysReg(PhysReg), LaneMask(LaneMask) {}
+    RegisterMaskPair(MCRegister PhysReg, LaneBitmask LaneMask)
+        : PhysReg(PhysReg), LaneMask(LaneMask) {
+      assert(PhysReg.isPhysical());
+    }
 
     bool operator==(const RegisterMaskPair &other) const {
       return PhysReg == other.PhysReg && LaneMask == other.LaneMask;
@@ -186,6 +182,9 @@ private:
   /// Indicate that this MachineBasicBlock is referenced somewhere other than
   /// as predecessor/successor, a terminator MachineInstr, or a jump table.
   bool MachineBlockAddressTaken = false;
+
+  /// Relatively stable number used for analyses.
+  unsigned AnalysisNumber = 0;
 
   /// If this MachineBasicBlock corresponds to an IR-level "blockaddress"
   /// constant, this contains a pointer to that block.
@@ -505,9 +504,19 @@ public:
   LLVM_ABI void removeLiveIn(MCRegister Reg,
                              LaneBitmask LaneMask = LaneBitmask::getAll());
 
+  /// Remove the specified register from any overlapped live in. The method is
+  /// subreg-aware and removes Reg and its subregs from the live in set. It also
+  /// clears the corresponding bitmask from its live-in super registers.
+  LLVM_ABI void removeLiveInOverlappedWith(MCRegister Reg);
+
   /// Return true if the specified register is in the live in set.
   LLVM_ABI bool isLiveIn(MCRegister Reg,
                          LaneBitmask LaneMask = LaneBitmask::getAll()) const;
+
+  /// Return true if any part of \p Reg is live in, accounting for live-ins of
+  /// overlapping registers and their lane masks.
+  LLVM_ABI bool isLiveInOverlappedWith(MCRegister Reg,
+                                       const TargetRegisterInfo &TRI) const;
 
   // Iteration support for live in sets.  These sets are kept in sorted
   // order by their register number.
@@ -542,8 +551,8 @@ public:
     using pointer = const RegisterMaskPair *;
     using reference = const RegisterMaskPair &;
 
-    liveout_iterator(const MachineBasicBlock &MBB, MCPhysReg ExceptionPointer,
-                     MCPhysReg ExceptionSelector, bool End)
+    liveout_iterator(const MachineBasicBlock &MBB, MCRegister ExceptionPointer,
+                     MCRegister ExceptionSelector, bool End)
         : ExceptionPointer(ExceptionPointer),
           ExceptionSelector(ExceptionSelector), BlockI(MBB.succ_begin()),
           BlockEnd(MBB.succ_end()) {
@@ -608,7 +617,7 @@ public:
       return true;
     }
 
-    MCPhysReg ExceptionPointer, ExceptionSelector;
+    MCRegister ExceptionPointer, ExceptionSelector;
     const_succ_iterator BlockI;
     const_succ_iterator BlockEnd;
     livein_iterator LiveRegI;
@@ -998,44 +1007,51 @@ public:
   /// Split the critical edge from this block to the given successor block, and
   /// return the newly created block, or null if splitting is not possible.
   ///
-  /// This function updates LiveVariables, MachineDominatorTree, and
+  /// This function updates LiveIntervals, MachineDominatorTree, and
   /// MachineLoopInfo, as applicable.
+  ///
+  /// If \p LiveOutSets is provided, it must hold the indexes of the virtual
+  /// registers live out of each block, indexed by block number. Only those
+  /// registers are considered when updating LiveIntervals, and the set for the
+  /// new block is added.
   struct SplitCriticalEdgeAnalyses {
     LiveIntervals *LIS;
     SlotIndexes *SI;
-    LiveVariables *LV;
     MachineLoopInfo *MLI;
+    std::vector<SparseBitVector<>> *LiveOutSets = nullptr;
   };
 
   MachineBasicBlock *
   SplitCriticalEdge(MachineBasicBlock *Succ, Pass &P,
-                    std::vector<SparseBitVector<>> *LiveInSets = nullptr,
                     MachineDomTreeUpdater *MDTU = nullptr) {
-    return SplitCriticalEdge(Succ, &P, nullptr, LiveInSets, MDTU);
+    return SplitCriticalEdge(Succ, &P, nullptr, MDTU);
   }
 
   MachineBasicBlock *
   SplitCriticalEdge(MachineBasicBlock *Succ,
                     MachineFunctionAnalysisManager &MFAM,
-                    std::vector<SparseBitVector<>> *LiveInSets = nullptr,
                     MachineDomTreeUpdater *MDTU = nullptr) {
-    return SplitCriticalEdge(Succ, nullptr, &MFAM, LiveInSets, MDTU);
+    return SplitCriticalEdge(Succ, nullptr, &MFAM, MDTU);
   }
 
   // Helper method for new pass manager migration.
-  LLVM_ABI MachineBasicBlock *SplitCriticalEdge(
-      MachineBasicBlock *Succ, const SplitCriticalEdgeAnalyses &Analyses,
-      std::vector<SparseBitVector<>> *LiveInSets, MachineDomTreeUpdater *MDTU);
+  LLVM_ABI MachineBasicBlock *
+  SplitCriticalEdge(MachineBasicBlock *Succ,
+                    const SplitCriticalEdgeAnalyses &Analyses,
+                    MachineDomTreeUpdater *MDTU = nullptr);
 
-  LLVM_ABI MachineBasicBlock *SplitCriticalEdge(
-      MachineBasicBlock *Succ, Pass *P, MachineFunctionAnalysisManager *MFAM,
-      std::vector<SparseBitVector<>> *LiveInSets, MachineDomTreeUpdater *MDTU);
+  LLVM_ABI MachineBasicBlock *
+  SplitCriticalEdge(MachineBasicBlock *Succ, Pass *P,
+                    MachineFunctionAnalysisManager *MFAM,
+                    MachineDomTreeUpdater *MDTU = nullptr);
 
   /// Check if the edge between this block and the given successor \p
   /// Succ, can be split. If this returns true a subsequent call to
   /// SplitCriticalEdge is guaranteed to return a valid basic block if
   /// no changes occurred in the meantime.
-  LLVM_ABI bool canSplitCriticalEdge(const MachineBasicBlock *Succ) const;
+  LLVM_ABI bool
+  canSplitCriticalEdge(const MachineBasicBlock *Succ,
+                       const MachineLoopInfo *MLI = nullptr) const;
 
   void pop_front() { Insts.pop_front(); }
   void pop_back() { Insts.pop_back(); }
@@ -1260,6 +1276,10 @@ public:
   int getNumber() const { return Number; }
   void setNumber(int N) { Number = N; }
 
+  /// For analyses, blocks have a more stable number.
+  int getAnalysisNumber() const { return AnalysisNumber; }
+  void setAnalysisNumber(int N) { AnalysisNumber = N; }
+
   /// Return the call frame size on entry to this basic block.
   unsigned getCallFrameSize() const { return CallFrameSize; }
   /// Set the call frame size on entry to this basic block.
@@ -1286,6 +1306,15 @@ public:
 
   // Helper function for MIRPrinter.
   LLVM_ABI bool canPredictBranchProbabilities() const;
+
+  /// Iterate over block PHI instructions and remove all incoming values for
+  /// PredMBB.
+  ///
+  /// Method does not erase PHI instructions even if they have single income or
+  /// do not have incoming values ar all. It is a caller responsibility to make
+  /// decision how to process PHI instructions after incoming values removal.
+  LLVM_ABI void
+  removePHIsIncomingValuesForPredecessor(const MachineBasicBlock &PredMBB);
 
 private:
   /// Return probability iterator corresponding to the I successor iterator.
@@ -1346,8 +1375,8 @@ template <> struct GraphTraits<MachineBasicBlock *> {
   static ChildIteratorType child_end(NodeRef N) { return N->succ_end(); }
 
   static unsigned getNumber(MachineBasicBlock *BB) {
-    assert(BB->getNumber() >= 0 && "negative block number");
-    return BB->getNumber();
+    assert(BB->getAnalysisNumber() >= 0 && "negative block number");
+    return BB->getAnalysisNumber();
   }
 };
 
@@ -1363,8 +1392,8 @@ template <> struct GraphTraits<const MachineBasicBlock *> {
   static ChildIteratorType child_end(NodeRef N) { return N->succ_end(); }
 
   static unsigned getNumber(const MachineBasicBlock *BB) {
-    assert(BB->getNumber() >= 0 && "negative block number");
-    return BB->getNumber();
+    assert(BB->getAnalysisNumber() >= 0 && "negative block number");
+    return BB->getAnalysisNumber();
   }
 };
 
@@ -1389,8 +1418,8 @@ template <> struct GraphTraits<Inverse<MachineBasicBlock*>> {
   static ChildIteratorType child_end(NodeRef N) { return N->pred_end(); }
 
   static unsigned getNumber(MachineBasicBlock *BB) {
-    assert(BB->getNumber() >= 0 && "negative block number");
-    return BB->getNumber();
+    assert(BB->getAnalysisNumber() >= 0 && "negative block number");
+    return BB->getAnalysisNumber();
   }
 };
 
@@ -1409,8 +1438,8 @@ template <> struct GraphTraits<Inverse<const MachineBasicBlock*>> {
   static ChildIteratorType child_end(NodeRef N) { return N->pred_end(); }
 
   static unsigned getNumber(const MachineBasicBlock *BB) {
-    assert(BB->getNumber() >= 0 && "negative block number");
-    return BB->getNumber();
+    assert(BB->getAnalysisNumber() >= 0 && "negative block number");
+    return BB->getAnalysisNumber();
   }
 };
 
@@ -1449,8 +1478,6 @@ public:
   }
   MachineBasicBlock::iterator end() { return E; }
   bool empty() { return begin() == end(); }
-
-  MachineBasicBlock::iterator getInitial() { return I; }
 };
 
 /// Increment \p It until it points to a non-debug instruction or to \p End

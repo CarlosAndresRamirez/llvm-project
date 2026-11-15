@@ -7,12 +7,12 @@
 //===----------------------------------------------------------------------===//
 
 #include "flang-rt/runtime/io-stmt.h"
-#include "unit.h"
 #include "flang-rt/runtime/connection.h"
 #include "flang-rt/runtime/emit-encoded.h"
 #include "flang-rt/runtime/format.h"
 #include "flang-rt/runtime/memory.h"
 #include "flang-rt/runtime/tools.h"
+#include "flang-rt/runtime/unit.h"
 #include "flang-rt/runtime/utf.h"
 #include <algorithm>
 #include <cstdio>
@@ -219,9 +219,7 @@ template <Direction DIR>
 void InternalListIoStatementState<DIR>::CompleteOperation() {
   if (!this->completedOperation()) {
     if constexpr (DIR == Direction::Output) {
-      if (unit_.furthestPositionInRecord > 0) {
-        unit_.AdvanceRecord(*this);
-      }
+      unit_.AdvanceRecord(*this);
     }
     IoStatementBase::CompleteOperation();
   }
@@ -264,19 +262,17 @@ int ExternalIoStatementBase::EndIoStatement() {
   unit_.EndIoStatement(); // annihilates *this in unit_.u_
   if (destroy_) {
     if (ExternalFileUnit *
-        toClose{ExternalFileUnit::LookUpForClose(unitNumber)}) {
+        toClose{ExternalFileUnit::LookUpForClose(unitNumber, *this)}) {
       toClose->Close(CloseStatus::Delete, *this);
-      toClose->DestroyClosed();
+      toClose->DestroyClosed(*this);
     }
   }
 #else
-  // Fetch the unit pointer before *this disappears.
-  ExternalFileUnit *unitPtr{&unit_};
   // The pseudo file units are dynamically allocated
-  // and are not tracked in the unit map.
-  // They have to be destructed and deallocated here.
-  unitPtr->~ExternalFileUnit();
-  FreeMemory(unitPtr);
+  // and are not tracked in any unit map.
+  // They have to be destroyed and deallocated here.
+  unit_.~ExternalFileUnit();
+  FreeMemory(&unit_);
 #endif
   return result;
 }
@@ -379,7 +375,7 @@ int CloseStatementState::EndIoStatement() {
   CompleteOperation();
   int result{ExternalIoStatementBase::EndIoStatement()};
   unit().CloseUnit(status_, *this);
-  unit().DestroyClosed();
+  unit().DestroyClosed(*this);
   return result;
 }
 
@@ -687,6 +683,14 @@ common::optional<char32_t> IoStatementState::NextInField(
             return common::nullopt;
           }
           break;
+        case '!':
+          // Extension (gfortran, ifx, classic nvfortran): in NAMELIST input,
+          // '!' terminates a value even when not preceded by a separator,
+          // so that "name=value!comment" is accepted.
+          if (edit.IsNamelist()) {
+            return common::nullopt;
+          }
+          break;
         case ',':
           if (!(edit.modes.editingFlags & decimalComma)) {
             return common::nullopt;
@@ -880,6 +884,9 @@ ListDirectedStatementState<Direction::Input>::GetNextDataEdit(
     edit.descriptor = DataEdit::ListDirectedImaginaryPart;
   }
   auto fastField{io.GetUpcomingFastAsciiField()};
+  // Reaching EOF is okay when peeking at list-directed defined input;
+  // pretend that there's an END= in that case.
+  bool oldHasEnd{maxRepeat == 0 && !io.GetIoErrorHandler().SetHasEnd()};
   auto ch{io.GetNextNonBlank(byteCount, &fastField)};
   if (ch && *ch == comma && eatComma_) {
     // Consume comma & whitespace after previous item.
@@ -890,27 +897,32 @@ ListDirectedStatementState<Direction::Input>::GetNextDataEdit(
     ch = io.GetNextNonBlank(byteCount, &fastField);
   }
   eatComma_ = true;
-  if (!ch) {
-    return common::nullopt;
+  if (maxRepeat == 0 && !oldHasEnd) {
+    io.GetIoErrorHandler().SetHasEnd(false);
   }
-  if (*ch == '/') {
+  if (!ch) { // EOF
+    if (maxRepeat == 0) {
+      return edit; // DataEdit::ListDirected for look-ahead
+    } else {
+      return common::nullopt;
+    }
+  } else if (*ch == '/') {
     hitSlash_ = true;
     edit.descriptor = DataEdit::ListDirectedNullValue;
     return edit;
-  }
-  if (*ch == comma) { // separator: null value
+  } else if (*ch == comma) { // separator: null value
     edit.descriptor = DataEdit::ListDirectedNullValue;
     return edit;
-  }
-  if (imaginaryPart_) { // can't repeat components
+  } else if (imaginaryPart_) { // can't repeat components
     return edit;
   }
-  if (*ch >= '0' && *ch <= '9' && fastField.MightHaveAsterisk()) {
-    // look for "r*" repetition count
+  if (*ch >= '0' && *ch <= '9' && fastField.MightBeRepetitionCount()) {
+    // There's decimal digits followed by '*'.
     auto start{fastField.connection().positionInRecord};
     int r{0};
     do {
-      static auto constexpr clamp{(std::numeric_limits<int>::max() - '9') / 10};
+      static auto constexpr clamp{
+          (common::numeric_limits<int>::max() - '9') / 10};
       if (r >= clamp) {
         r = 0;
         break;
@@ -975,7 +987,9 @@ template <Direction DIR>
 ChildIoStatementState<DIR>::ChildIoStatementState(
     ChildIo &child, const char *sourceFile, int sourceLine)
     : IoStatementBase{sourceFile, sourceLine}, child_{child},
-      mutableModes_{child.parent().mutableModes()} {}
+      mutableModes_{child.parent().mutableModes()} {
+  mutableModes_.inNamelist = false;
+}
 
 template <Direction DIR>
 const NonTbpDefinedIoTable *
@@ -1076,6 +1090,14 @@ void ChildFormattedIoStatementState<DIR, CHAR>::CompleteOperation() {
 
 template <Direction DIR, typename CHAR>
 int ChildFormattedIoStatementState<DIR, CHAR>::EndIoStatement() {
+  if constexpr (DIR == Direction::Input) {
+    if (auto *listInput{this->child()
+                .parent()
+                .template get_if<
+                    ListDirectedStatementState<Direction::Input>>()}) {
+      listInput->set_eatComma(false);
+    }
+  }
   CompleteOperation();
   return ChildIoStatementState<DIR>::EndIoStatement();
 }
@@ -1094,10 +1116,20 @@ ChildListIoStatementState<DIR>::ChildListIoStatementState(
     ChildIo &child, const char *sourceFile, int sourceLine)
     : ChildIoStatementState<DIR>{child, sourceFile, sourceLine} {
 #if !defined(RT_DEVICE_AVOID_RECURSION)
-  if constexpr (DIR == Direction::Input) {
-    if (auto *listInput{child.parent()
-                .get_if<ListDirectedStatementState<Direction::Input>>()}) {
-      this->namelistGroup_ = listInput->namelistGroup();
+  if (const auto *listParent{
+          child.parent().get_if<ListDirectedStatementState<DIR>>()}) {
+    if constexpr (DIR == Direction::Input) {
+      this->set_eatComma(listParent->eatComma());
+      this->namelistGroup_ = listParent->namelistGroup();
+    }
+    if (auto *childListParent{
+            child.parent().get_if<ChildListIoStatementState<DIR>>()}) {
+      // Child list I/O whose parent is child list I/O: can advance
+      // if the parent can.
+      this->canAdvance_ = childListParent->CanAdvance();
+    } else {
+      // Child list I/O of top-level list I/O: can advance.
+      this->canAdvance_ = true;
     }
   }
 #else
@@ -1108,12 +1140,7 @@ ChildListIoStatementState<DIR>::ChildListIoStatementState(
 template <Direction DIR>
 bool ChildListIoStatementState<DIR>::AdvanceRecord(int n) {
 #if !defined(RT_DEVICE_AVOID_RECURSION)
-  // Allow child NAMELIST input to advance
-  if (DIR == Direction::Input && this->mutableModes().inNamelist) {
-    return this->child().parent().AdvanceRecord(n);
-  } else {
-    return false;
-  }
+  return this->CanAdvance() && this->child().parent().AdvanceRecord(n);
 #else
   this->ReportUnsupportedChildIo();
 #endif
@@ -1121,6 +1148,13 @@ bool ChildListIoStatementState<DIR>::AdvanceRecord(int n) {
 
 template <Direction DIR> int ChildListIoStatementState<DIR>::EndIoStatement() {
   if constexpr (DIR == Direction::Input) {
+    if (auto *listInput{this->child()
+                .parent()
+                .template get_if<
+                    ListDirectedStatementState<Direction::Input>>()}) {
+      listInput->set_eatComma(this->eatComma());
+      listInput->set_hitSlash(this->hitSlash());
+    }
     if (int status{ListDirectedStatementState<DIR>::EndIoStatement()};
         status != IostatOk) {
       return status;
@@ -1252,6 +1286,12 @@ bool InquireUnitState::Inquire(
         ? "UNDEFINED"
         : mutableModes().editingFlags & decimalComma ? "COMMA"
                                                      : "POINT";
+    break;
+  case HashInquiryKeyword("Leading_Zero"):
+    str = !unit().IsConnected() || unit().isUnformatted.value_or(true)
+        ? "UNDEFINED"
+        : mutableModes().editingFlags & leadingZeroSuppress ? "SUPPRESS"
+                                                            : "PRINT";
     break;
   case HashInquiryKeyword("DELIM"):
     if (!unit().IsConnected() || unit().isUnformatted.value_or(true)) {
@@ -1444,7 +1484,7 @@ bool InquireUnitState::Inquire(
     } else if (unit().openRecl) {
       result = *unit().openRecl;
     } else {
-      result = std::numeric_limits<std::int32_t>::max();
+      result = common::numeric_limits<std::int32_t>::max();
     }
     return true;
   case HashInquiryKeyword("SIZE"):
@@ -1478,6 +1518,7 @@ bool InquireNoUnitState::Inquire(
   case HashInquiryKeyword("DECIMAL"):
   case HashInquiryKeyword("DELIM"):
   case HashInquiryKeyword("FORM"):
+  case HashInquiryKeyword("Leading_Zero"):
   case HashInquiryKeyword("NAME"):
   case HashInquiryKeyword("PAD"):
   case HashInquiryKeyword("POSITION"):
@@ -1566,6 +1607,7 @@ bool InquireUnconnectedFileState::Inquire(
   case HashInquiryKeyword("DECIMAL"):
   case HashInquiryKeyword("DELIM"):
   case HashInquiryKeyword("FORM"):
+  case HashInquiryKeyword("Leading_Zero"):
   case HashInquiryKeyword("PAD"):
   case HashInquiryKeyword("POSITION"):
   case HashInquiryKeyword("ROUND"):

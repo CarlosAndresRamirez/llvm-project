@@ -15,7 +15,7 @@
 
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Dialect/AMDGPU/Transforms/Passes.h"
-#include "mlir/Dialect/Affine/Passes.h"
+#include "mlir/Dialect/Affine/Transforms/Passes.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Dialect/ArmSME/Transforms/Passes.h"
 #include "mlir/Dialect/ArmSVE/Transforms/Passes.h"
@@ -25,14 +25,20 @@
 #include "mlir/Dialect/EmitC/Transforms/Passes.h"
 #include "mlir/Dialect/Func/Transforms/Passes.h"
 #include "mlir/Dialect/GPU/Pipelines/Passes.h"
+#include "mlir/Dialect/GPU/Transforms/NVVM/Passes.h"
 #include "mlir/Dialect/GPU/Transforms/Passes.h"
+#include "mlir/Dialect/GPU/Transforms/ROCDL/Passes.h"
+#include "mlir/Dialect/GPU/Transforms/SPIRV/Passes.h"
+#include "mlir/Dialect/GPU/Transforms/XeVM/Passes.h"
 #include "mlir/Dialect/LLVMIR/Transforms/Passes.h"
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/MLProgram/Transforms/Passes.h"
 #include "mlir/Dialect/Math/Transforms/Passes.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/NVGPU/Transforms/Passes.h"
+#include "mlir/Dialect/NVVM/Transforms/Passes.h"
 #include "mlir/Dialect/OpenACC/Transforms/Passes.h"
+#include "mlir/Dialect/OpenMP/Transforms/Passes.h"
 #include "mlir/Dialect/Quant/Transforms/Passes.h"
 #include "mlir/Dialect/SCF/Transforms/Passes.h"
 #include "mlir/Dialect/SPIRV/Transforms/Passes.h"
@@ -71,8 +77,13 @@ void mlir::registerAllPasses() {
   bufferization::registerBufferizationPasses();
   func::registerFuncPasses();
   registerGPUPasses();
+  registerGPUNVVMPasses();
+  registerGPUROCDLPasses();
+  registerGPUSPIRVPasses();
+  registerGPUXeVMPasses();
   registerLinalgPasses();
   registerNVGPUPasses();
+  NVVM::registerNVVMPasses();
   registerSparseTensorPasses();
   LLVM::registerLLVMPasses();
   LLVM::registerTargetLLVMIRTransformsPasses();
@@ -80,12 +91,13 @@ void mlir::registerAllPasses() {
   memref::registerMemRefPasses();
   shard::registerShardPasses();
   ml_program::registerMLProgramPasses();
+  omp::registerOpenMPPasses();
   quant::registerQuantPasses();
   registerSCFPasses();
   registerShapePasses();
   spirv::registerSPIRVPasses();
   tensor::registerTensorPasses();
-  tosa::registerTosaOptPasses();
+  tosa::registerTosaPasses();
   transform::registerTransformPasses();
   vector::registerVectorPasses();
   arm_sme::registerArmSMEPasses();
@@ -98,4 +110,6 @@ void mlir::registerAllPasses() {
   sparse_tensor::registerSparseTensorPipelines();
   tosa::registerTosaToLinalgPipelines();
   gpu::registerGPUToNVVMPipeline();
+  gpu::registerGPUToROCDLPipeline();
+  gpu::registerGPUToXeVMPipeline();
 }

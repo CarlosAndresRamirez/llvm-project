@@ -34,6 +34,7 @@
 #define DEBUG_TYPE "hexagon-disassembler"
 
 using namespace llvm;
+using namespace llvm::MCD;
 using namespace Hexagon;
 
 using DecodeStatus = MCDisassembler::DecodeStatus;
@@ -64,6 +65,10 @@ public:
                                     raw_ostream &CStream) const override;
 
   void remapInstruction(MCInst &Instr) const;
+
+  Expected<bool> onSymbolStart(SymbolInfoTy &Symbol, uint64_t &Size,
+                               ArrayRef<uint8_t> Bytes,
+                               uint64_t Address) const override;
 
 private:
   bool makeBundle(ArrayRef<uint8_t> Bytes, uint64_t Address,
@@ -137,6 +142,12 @@ static DecodeStatus DecodeHvxWRRegisterClass(MCInst &Inst, unsigned RegNo,
 static DecodeStatus DecodeHvxVQRRegisterClass(MCInst &Inst, unsigned RegNo,
                                               uint64_t Address,
                                               const MCDisassembler *Decoder);
+static DecodeStatus DecodeHlxLRRegisterClass(MCInst &Inst, unsigned RegNo,
+                                             uint64_t Address,
+                                             const MCDisassembler *Decoder);
+static DecodeStatus DecodeHlxLLRRegisterClass(MCInst &Inst, unsigned RegNo,
+                                              uint64_t Address,
+                                              const MCDisassembler *Decoder);
 static DecodeStatus DecodePredRegsRegisterClass(MCInst &Inst, unsigned RegNo,
                                                 uint64_t Address,
                                                 const MCDisassembler *Decoder);
@@ -173,6 +184,19 @@ static DecodeStatus s32_0ImmDecoder(MCInst &MI, unsigned tmp,
                                     const MCDisassembler *Decoder);
 static DecodeStatus brtargetDecoder(MCInst &MI, unsigned tmp, uint64_t Address,
                                     const MCDisassembler *Decoder);
+
+static DecodeStatus n1ConstDecoder(MCInst &MI, const MCDisassembler *Decoder) {
+  MCContext &Ctx = Decoder->getContext();
+  MI.addOperand(MCOperand::createExpr(MCConstantExpr::create(-1, Ctx)));
+  return DecodeStatus::Success;
+}
+
+static DecodeStatus sgp10ConstDecoder(MCInst &MI,
+                                      const MCDisassembler *Decoder) {
+  MI.addOperand(MCOperand::createReg(Hexagon::SGP1_0));
+  return DecodeStatus::Success;
+}
+
 #include "HexagonDepDecoders.inc"
 #include "HexagonGenDisassemblerTables.inc"
 
@@ -349,21 +373,6 @@ void HexagonDisassembler::remapInstruction(MCInst &Instr) const {
   }
 }
 
-static void adjustDuplex(MCInst &MI, MCContext &Context) {
-  switch (MI.getOpcode()) {
-  case Hexagon::SA1_setin1:
-    MI.insert(MI.begin() + 1,
-              MCOperand::createExpr(MCConstantExpr::create(-1, Context)));
-    break;
-  case Hexagon::SA1_dec:
-    MI.insert(MI.begin() + 2,
-              MCOperand::createExpr(MCConstantExpr::create(-1, Context)));
-    break;
-  default:
-    break;
-  }
-}
-
 DecodeStatus HexagonDisassembler::getSingleInstruction(MCInst &MI, MCInst &MCB,
                                                        ArrayRef<uint8_t> Bytes,
                                                        uint64_t Address,
@@ -468,12 +477,10 @@ DecodeStatus HexagonDisassembler::getSingleInstruction(MCInst &MI, MCInst &MCB,
     CurrentExtender = TmpExtender;
     if (Result != DecodeStatus::Success)
       return DecodeStatus::Fail;
-    adjustDuplex(*MILow, getContext());
     Result = decodeInstruction(
         DecodeHigh, *MIHigh, (Instruction >> 16) & 0x1fff, Address, this, STI);
     if (Result != DecodeStatus::Success)
       return DecodeStatus::Fail;
-    adjustDuplex(*MIHigh, getContext());
     MCOperand OPLow = MCOperand::createInst(MILow);
     MCOperand OPHigh = MCOperand::createInst(MIHigh);
     MI.addOperand(OPLow);
@@ -499,42 +506,9 @@ DecodeStatus HexagonDisassembler::getSingleInstruction(MCInst &MI, MCInst &MCB,
 
   }
 
-  switch (MI.getOpcode()) {
-  case Hexagon::J4_cmpeqn1_f_jumpnv_nt:
-  case Hexagon::J4_cmpeqn1_f_jumpnv_t:
-  case Hexagon::J4_cmpeqn1_fp0_jump_nt:
-  case Hexagon::J4_cmpeqn1_fp0_jump_t:
-  case Hexagon::J4_cmpeqn1_fp1_jump_nt:
-  case Hexagon::J4_cmpeqn1_fp1_jump_t:
-  case Hexagon::J4_cmpeqn1_t_jumpnv_nt:
-  case Hexagon::J4_cmpeqn1_t_jumpnv_t:
-  case Hexagon::J4_cmpeqn1_tp0_jump_nt:
-  case Hexagon::J4_cmpeqn1_tp0_jump_t:
-  case Hexagon::J4_cmpeqn1_tp1_jump_nt:
-  case Hexagon::J4_cmpeqn1_tp1_jump_t:
-  case Hexagon::J4_cmpgtn1_f_jumpnv_nt:
-  case Hexagon::J4_cmpgtn1_f_jumpnv_t:
-  case Hexagon::J4_cmpgtn1_fp0_jump_nt:
-  case Hexagon::J4_cmpgtn1_fp0_jump_t:
-  case Hexagon::J4_cmpgtn1_fp1_jump_nt:
-  case Hexagon::J4_cmpgtn1_fp1_jump_t:
-  case Hexagon::J4_cmpgtn1_t_jumpnv_nt:
-  case Hexagon::J4_cmpgtn1_t_jumpnv_t:
-  case Hexagon::J4_cmpgtn1_tp0_jump_nt:
-  case Hexagon::J4_cmpgtn1_tp0_jump_t:
-  case Hexagon::J4_cmpgtn1_tp1_jump_nt:
-  case Hexagon::J4_cmpgtn1_tp1_jump_t:
-    MI.insert(MI.begin() + 1,
-              MCOperand::createExpr(MCConstantExpr::create(-1, getContext())));
-    break;
-  case Hexagon::Y4_crswap10:
-    MI.addOperand(MCOperand::createReg(Hexagon::SGP1_0));
-    break;
-  default:
-    break;
-  }
-
-  if (HexagonMCInstrInfo::isNewValue(*MCII, MI)) {
+  // HLX NV instructions use the producing register directly in the encoding.
+  if (HexagonMCInstrInfo::isNewValue(*MCII, MI) &&
+      !HexagonMCInstrInfo::isHLX(*MCII, MI)) {
     unsigned OpIndex = HexagonMCInstrInfo::getNewValueOp(*MCII, MI);
     MCOperand &MCO = MI.getOperand(OpIndex);
     assert(MCO.isReg() && "New value consumers must be registers");
@@ -605,6 +579,18 @@ DecodeStatus HexagonDisassembler::getSingleInstruction(MCInst &MI, MCInst &MCB,
   return Result;
 }
 
+Expected<bool> HexagonDisassembler::onSymbolStart(SymbolInfoTy &Symbol,
+                                                  uint64_t &Size,
+                                                  ArrayRef<uint8_t> Bytes,
+                                                  uint64_t Address) const {
+  // At the start of a symbol, force a fresh packet by resetting any
+  // in-progress bundle state. This prevents packets from straddling label
+  // boundaries when data (e.g. jump tables) appears in between.
+  Size = 0;
+  resetBundle();
+  return true;
+}
+
 static DecodeStatus DecodeRegisterClass(MCInst &Inst, unsigned RegNo,
                                         ArrayRef<MCPhysReg> Table) {
   if (RegNo < Table.size()) {
@@ -665,6 +651,31 @@ static DecodeStatus DecodeHvxVRRegisterClass(MCInst &Inst, unsigned RegNo,
   return DecodeRegisterClass(Inst, RegNo, HvxVRDecoderTable);
 }
 
+static DecodeStatus DecodeHlxLRRegisterClass(MCInst &Inst, unsigned RegNo,
+                                             uint64_t /*Address*/,
+                                             const MCDisassembler *Decoder) {
+  static const MCPhysReg HlxLRDecoderTable[] = {
+      Hexagon::L0,  Hexagon::L1,  Hexagon::L2,  Hexagon::L3,
+      Hexagon::L4,  Hexagon::L5,  Hexagon::L6,  Hexagon::L7,
+      Hexagon::L8,  Hexagon::L9,  Hexagon::L10, Hexagon::L11,
+      Hexagon::L12, Hexagon::L13, Hexagon::L14, Hexagon::L15};
+
+  return DecodeRegisterClass(Inst, RegNo, HlxLRDecoderTable);
+}
+
+static DecodeStatus DecodeHlxLLRRegisterClass(MCInst &Inst, unsigned RegNo,
+                                              uint64_t /*Address*/,
+                                              const MCDisassembler *Decoder) {
+  static const MCPhysReg HlxLLRDecoderTable[] = {
+      Hexagon::LL0, Hexagon::LL1, Hexagon::LL2, Hexagon::LL3,
+      Hexagon::LL4, Hexagon::LL5, Hexagon::LL6, Hexagon::LL7};
+
+  if (RegNo & 1)
+    return MCDisassembler::Fail;
+
+  return DecodeRegisterClass(Inst, RegNo / 2, HlxLLRDecoderTable);
+}
+
 static DecodeStatus
 DecodeDoubleRegsRegisterClass(MCInst &Inst, unsigned RegNo,
                               uint64_t /*Address*/,
@@ -705,11 +716,10 @@ static DecodeStatus DecodeHvxWRRegisterClass(MCInst &Inst, unsigned RegNo,
   return DecodeRegisterClass(Inst, RegNo, HvxWRDecoderTable);
 }
 
-LLVM_ATTRIBUTE_UNUSED // Suppress warning temporarily.
-    static DecodeStatus
-    DecodeHvxVQRRegisterClass(MCInst &Inst, unsigned RegNo,
-                              uint64_t /*Address*/,
-                              const MCDisassembler *Decoder) {
+[[maybe_unused]] // Suppress warning temporarily.
+static DecodeStatus DecodeHvxVQRRegisterClass(MCInst &Inst, unsigned RegNo,
+                                              uint64_t /*Address*/,
+                                              const MCDisassembler *Decoder) {
   static const MCPhysReg HvxVQRDecoderTable[] = {
       Hexagon::VQ0,  Hexagon::VQ1,  Hexagon::VQ2,  Hexagon::VQ3,
       Hexagon::VQ4,  Hexagon::VQ5,  Hexagon::VQ6,  Hexagon::VQ7};
@@ -741,15 +751,14 @@ static DecodeStatus DecodeCtrRegsRegisterClass(MCInst &Inst, unsigned RegNo,
   using namespace Hexagon;
 
   static const MCPhysReg CtrlRegDecoderTable[] = {
-    /*  0 */  SA0,        LC0,        SA1,        LC1,
-    /*  4 */  P3_0,       C5,         M0,         M1,
-    /*  8 */  USR,        PC,         UGP,        GP,
-    /* 12 */  CS0,        CS1,        UPCYCLELO,  UPCYCLEHI,
-    /* 16 */  FRAMELIMIT, FRAMEKEY,   PKTCOUNTLO, PKTCOUNTHI,
-    /* 20 */  0,          0,          0,          0,
-    /* 24 */  0,          0,          0,          0,
-    /* 28 */  0,          0,          UTIMERLO,   UTIMERHI
-  };
+      /*  0 */ SA0,         LC0,      SA1,        LC1,
+      /*  4 */ P3_0,        C5,       M0,         M1,
+      /*  8 */ USR,         PC,       UGP,        GP,
+      /* 12 */ CS0,         CS1,      UPCYCLELO,  UPCYCLEHI,
+      /* 16 */ FRAMELIMIT,  FRAMEKEY, PKTCOUNTLO, PKTCOUNTHI,
+      /* 20 */ 0,           0,        0,          0,
+      /* 24 */ 0,           0,        0,          0,
+      /* 28 */ VFRAMELIMIT, VSP,      UTIMERLO,   UTIMERHI};
 
   if (RegNo >= std::size(CtrlRegDecoderTable))
     return MCDisassembler::Fail;
@@ -769,15 +778,14 @@ DecodeCtrRegs64RegisterClass(MCInst &Inst, unsigned RegNo, uint64_t /*Address*/,
   using namespace Hexagon;
 
   static const MCPhysReg CtrlReg64DecoderTable[] = {
-    /*  0 */  C1_0,       0,          C3_2,       0,
-    /*  4 */  C5_4,       0,          C7_6,       0,
-    /*  8 */  C9_8,       0,          C11_10,     0,
-    /* 12 */  CS,         0,          UPCYCLE,    0,
-    /* 16 */  C17_16,     0,          PKTCOUNT,   0,
-    /* 20 */  0,          0,          0,          0,
-    /* 24 */  0,          0,          0,          0,
-    /* 28 */  0,          0,          UTIMER,     0
-  };
+      /*  0 */ C1_0,   0, C3_2,     0,
+      /*  4 */ C5_4,   0, C7_6,     0,
+      /*  8 */ C9_8,   0, C11_10,   0,
+      /* 12 */ CS,     0, UPCYCLE,  0,
+      /* 16 */ C17_16, 0, PKTCOUNT, 0,
+      /* 20 */ 0,      0, 0,        0,
+      /* 24 */ 0,      0, 0,        0,
+      /* 28 */ C29_28, 0, UTIMER,   0};
 
   if (RegNo >= std::size(CtrlReg64DecoderTable))
     return MCDisassembler::Fail;

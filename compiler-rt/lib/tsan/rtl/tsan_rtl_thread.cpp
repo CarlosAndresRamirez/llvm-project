@@ -96,25 +96,10 @@ void ThreadFinalize(ThreadState *thr) {
   }
 
   for (uptr i = 0; i < leaks.Size(); i++) {
-    // Use alloca, because malloc during signal handling deadlocks
-    ScopedReport *rep = (ScopedReport *)__builtin_alloca(sizeof(ScopedReport));
-    // Take a new scope as Apple platforms require the below locks released
-    // before symbolizing in order to avoid a deadlock
-    {
-      ThreadRegistryLock l(&ctx->thread_registry);
-      new (rep) ScopedReport(ReportTypeThreadLeak);
-      rep->AddThread(leaks[i].tctx, true);
-      rep->SetCount(leaks[i].count);
-#  if SANITIZER_APPLE
-    }  // Close this scope to release the locks
-#  endif
-      OutputReport(thr, *rep);
-
-      // Need to manually destroy this because we used placement new to allocate
-      rep->~ScopedReport();
-#  if !SANITIZER_APPLE
-    }
-#  endif
+    ScopedReport rep(ReportTypeThreadLeak);
+    rep.AddThread(leaks[i].tctx, true);
+    rep.SetCount(leaks[i].count);
+    OutputReport(thr, rep);
   }
 #endif
 }
@@ -206,10 +191,14 @@ void ThreadStart(ThreadState *thr, Tid tid, ThreadID os_id,
   }
 #endif
 
-#if !SANITIZER_GO
+#if !SANITIZER_GO && !SANITIZER_ANDROID
   // Don't imitate stack/TLS writes for the main thread,
   // because its initialization is synchronized with all
   // subsequent threads anyway.
+  // Because thr is created by MmapOrDie, the thr object
+  // is not in tls, the pointer to the thr object is in
+  // TLS_SLOT_SANITIZER slot. So skip this check on
+  // Android platform.
   if (tid != kMainTid) {
     if (stk_addr && stk_size) {
       const uptr pc = StackTrace::GetNextInstructionPc(

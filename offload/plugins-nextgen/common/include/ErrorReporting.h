@@ -28,7 +28,6 @@
 #include <functional>
 #include <optional>
 #include <string>
-#include <unistd.h>
 
 namespace llvm {
 namespace omp {
@@ -58,25 +57,26 @@ class ErrorReporter {
     return Device ? std::to_string(Device->getDeviceId()) : "n/a";
   }
 
-  /// Return a nice name for an TargetAllocTy.
-  static StringRef getAllocTyName(TargetAllocTy Kind) {
+  /// Return a nice name for an ol_alloc_type_t.
+  static StringRef getAllocTyName(ol_alloc_type_t Kind) {
     switch (Kind) {
-    case TARGET_ALLOC_DEVICE_NON_BLOCKING:
-    case TARGET_ALLOC_DEFAULT:
-    case TARGET_ALLOC_DEVICE:
+    case OL_ALLOC_TYPE_DEVICE:
       return "device memory";
-    case TARGET_ALLOC_HOST:
+    case OL_ALLOC_TYPE_HOST:
       return "pinned host memory";
-    case TARGET_ALLOC_SHARED:
+    case OL_ALLOC_TYPE_MANAGED:
       return "managed memory";
+    default:
       break;
     }
     llvm_unreachable("Unknown target alloc kind");
   }
 
+#ifdef __clang__
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wgcc-compat"
 #pragma clang diagnostic ignored "-Wformat-security"
+#endif
   /// Print \p Format, instantiated with \p Args to stderr.
   /// TODO: Allow redirection into a file stream.
   template <typename... ArgsTy>
@@ -84,7 +84,7 @@ class ErrorReporter {
   [[gnu::format(__printf__, 1, 2)]]
 #endif
   static void print(const char *Format, ArgsTy &&...Args) {
-    raw_fd_ostream OS(STDERR_FILENO, false);
+    auto &OS = llvm::errs();
     OS << llvm::format(Format, Args...);
   }
 
@@ -95,7 +95,7 @@ class ErrorReporter {
   [[gnu::format(__printf__, 2, 3)]]
 #endif
   static void print(ColorTy Color, const char *Format, ArgsTy &&...Args) {
-    raw_fd_ostream OS(STDERR_FILENO, false);
+    auto &OS = llvm::errs();
     WithColor(OS, HighlightColor(Color)) << llvm::format(Format, Args...);
   }
 
@@ -111,7 +111,9 @@ class ErrorReporter {
     print(BoldRed, Format, Args...);
     print("\n");
   }
+#ifdef __clang__
 #pragma clang diagnostic pop
+#endif
 
   static void reportError(const char *Str) { reportError("%s", Str); }
   static void print(const char *Str) { print("%s", Str); }
@@ -161,15 +163,9 @@ class ErrorReporter {
       reportStackTrace(ATI->DeallocationTrace);
     }
 
-    if (ATI->HostPtr)
-      print(BoldLightPurple,
-            "Last allocation of size %lu for host pointer %p -> device pointer "
-            "%p:\n",
-            ATI->Size, ATI->HostPtr, ATI->DevicePtr);
-    else
-      print(BoldLightPurple,
-            "Last allocation of size %lu -> device pointer %p:\n", ATI->Size,
-            ATI->DevicePtr);
+    print(BoldLightPurple,
+          "Last allocation of size %lu -> device pointer %p:\n", ATI->Size,
+          ATI->DevicePtr);
     reportStackTrace(ATI->AllocationTrace);
     if (!ATI->LastAllocationInfo)
       return;
@@ -182,14 +178,8 @@ class ErrorReporter {
       print(BoldLightPurple, " #%u Prior deallocation of size %lu:\n", I,
             ATI->Size);
       reportStackTrace(ATI->DeallocationTrace);
-      if (ATI->HostPtr)
-        print(
-            BoldLightPurple,
-            " #%u Prior allocation for host pointer %p -> device pointer %p:\n",
-            I, ATI->HostPtr, ATI->DevicePtr);
-      else
-        print(BoldLightPurple, " #%u Prior allocation -> device pointer %p:\n",
-              I, ATI->DevicePtr);
+      print(BoldLightPurple, " #%u Prior allocation -> device pointer %p:\n", I,
+            ATI->DevicePtr);
       reportStackTrace(ATI->AllocationTrace);
       ++I;
     }
@@ -206,7 +196,7 @@ public:
   abortExecution();
 
   static void reportDeallocationOfNonAllocatedPtr(void *DevicePtr,
-                                                  TargetAllocTy Kind,
+                                                  ol_alloc_type_t Kind,
                                                   AllocationTraceInfoTy *ATI,
                                                   std::string &StackTrace) {
     DEALLOCATION_ERROR("deallocation of non-allocated %s: %p",
@@ -214,7 +204,7 @@ public:
   }
 
   static void reportDeallocationOfDeallocatedPtr(void *DevicePtr,
-                                                 TargetAllocTy Kind,
+                                                 ol_alloc_type_t Kind,
                                                  AllocationTraceInfoTy *ATI,
                                                  std::string &StackTrace) {
     DEALLOCATION_ERROR("double-free of %s: %p", getAllocTyName(Kind).data(),
@@ -222,7 +212,7 @@ public:
   }
 
   static void reportDeallocationOfWrongPtrKind(void *DevicePtr,
-                                               TargetAllocTy Kind,
+                                               ol_alloc_type_t Kind,
                                                AllocationTraceInfoTy *ATI,
                                                std::string &StackTrace) {
     DEALLOCATION_ERROR("deallocation requires %s but allocation was %s: %p",

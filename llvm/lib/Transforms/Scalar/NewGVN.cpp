@@ -52,12 +52,12 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Scalar/NewGVN.h"
+#include "ScalarOptions.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseMapInfo.h"
 #include "llvm/ADT/DenseSet.h"
-#include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/GraphTraits.h"
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/PointerIntPair.h"
@@ -97,11 +97,9 @@
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/ArrayRecycler.h"
 #include "llvm/Support/Casting.h"
-#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/DebugCounter.h"
 #include "llvm/Support/ErrorHandling.h"
-#include "llvm/Support/PointerLikeTypeTraits.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Scalar/GVNExpression.h"
 #include "llvm/Transforms/Utils/AssumeBundleBuilder.h"
@@ -145,24 +143,12 @@ DEBUG_COUNTER(VNCounter, "newgvn-vn",
               "Controls which instructions are value numbered");
 DEBUG_COUNTER(PHIOfOpsCounter, "newgvn-phi",
               "Controls which instructions we create phi of ops for");
-// Currently store defining access refinement is too slow due to basicaa being
-// egregiously slow.  This flag lets us keep it working while we work on this
-// issue.
-static cl::opt<bool> EnableStoreRefinement("enable-store-refinement",
-                                           cl::init(false), cl::Hidden);
-
-/// Currently, the generation "phi of ops" can result in correctness issues.
-static cl::opt<bool> EnablePhiOfOps("enable-phi-of-ops", cl::init(true),
-                                    cl::Hidden);
 
 //===----------------------------------------------------------------------===//
 //                                GVN Pass
 //===----------------------------------------------------------------------===//
 
 // Anchor methods.
-namespace llvm {
-namespace GVNExpression {
-
 Expression::~Expression() = default;
 BasicExpression::~BasicExpression() = default;
 CallExpression::~CallExpression() = default;
@@ -170,9 +156,6 @@ LoadExpression::~LoadExpression() = default;
 StoreExpression::~StoreExpression() = default;
 AggregateValueExpression::~AggregateValueExpression() = default;
 PHIExpression::~PHIExpression() = default;
-
-} // end namespace GVNExpression
-} // end namespace llvm
 
 namespace {
 
@@ -315,7 +298,7 @@ public:
   // Leader functions
   Value *getLeader() const { return RepLeader.first; }
   void setLeader(std::pair<Value *, unsigned int> Leader) {
-    RepLeader = Leader;
+    RepLeader = std::move(Leader);
   }
   const std::pair<Value *, unsigned int> &getNextLeader() const {
     return NextLeader;
@@ -324,10 +307,10 @@ public:
   bool addPossibleLeader(std::pair<Value *, unsigned int> LeaderPair) {
     if (LeaderPair.second < RepLeader.second) {
       NextLeader = RepLeader;
-      RepLeader = LeaderPair;
+      RepLeader = std::move(LeaderPair);
       return true;
     } else if (LeaderPair.second < NextLeader.second) {
-      NextLeader = LeaderPair;
+      NextLeader = std::move(LeaderPair);
     }
     return false;
   }
@@ -434,10 +417,6 @@ private:
   int StoreCount = 0;
 };
 
-} // end anonymous namespace
-
-namespace llvm {
-
 struct ExactEqualsExpression {
   const Expression &E;
 
@@ -449,20 +428,9 @@ struct ExactEqualsExpression {
     return E.exactlyEquals(Other);
   }
 };
+} // end anonymous namespace
 
-template <> struct DenseMapInfo<const Expression *> {
-  static const Expression *getEmptyKey() {
-    auto Val = static_cast<uintptr_t>(-1);
-    Val <<= PointerLikeTypeTraits<const Expression *>::NumLowBitsAvailable;
-    return reinterpret_cast<const Expression *>(Val);
-  }
-
-  static const Expression *getTombstoneKey() {
-    auto Val = static_cast<uintptr_t>(~1U);
-    Val <<= PointerLikeTypeTraits<const Expression *>::NumLowBitsAvailable;
-    return reinterpret_cast<const Expression *>(Val);
-  }
-
+template <> struct llvm::DenseMapInfo<const Expression *> {
   static unsigned getHashValue(const Expression *E) {
     return E->getComputedHash();
   }
@@ -472,17 +440,12 @@ template <> struct DenseMapInfo<const Expression *> {
   }
 
   static bool isEqual(const ExactEqualsExpression &LHS, const Expression *RHS) {
-    if (RHS == getTombstoneKey() || RHS == getEmptyKey())
-      return false;
     return LHS == *RHS;
   }
 
   static bool isEqual(const Expression *LHS, const Expression *RHS) {
     if (LHS == RHS)
       return true;
-    if (LHS == getTombstoneKey() || RHS == getTombstoneKey() ||
-        LHS == getEmptyKey() || RHS == getEmptyKey())
-      return false;
     // Compare hashes before equality.  This is *not* what the hashtable does,
     // since it is computing it modulo the number of buckets, whereas we are
     // using the full hash keyspace.  Since the hashes are precomputed, this
@@ -493,11 +456,10 @@ template <> struct DenseMapInfo<const Expression *> {
   }
 };
 
-} // end namespace llvm
-
 namespace {
 
 class NewGVN {
+  const ScalarOptions &Opts;
   Function &F;
   DominatorTree *DT = nullptr;
   const TargetLibraryInfo *TLI = nullptr;
@@ -671,10 +633,10 @@ class NewGVN {
   SmallPtrSet<Instruction *, 8> InstructionsToErase;
 
 public:
-  NewGVN(Function &F, DominatorTree *DT, AssumptionCache *AC,
-         TargetLibraryInfo *TLI, AliasAnalysis *AA, MemorySSA *MSSA,
-         const DataLayout &DL)
-      : F(F), DT(DT), TLI(TLI), AA(AA), MSSA(MSSA), AC(AC), DL(DL),
+  NewGVN(const ScalarOptions &Opts, Function &F, DominatorTree *DT,
+         AssumptionCache *AC, TargetLibraryInfo *TLI, AliasAnalysis *AA,
+         MemorySSA *MSSA, const DataLayout &DL)
+      : Opts(Opts), F(F), DT(DT), TLI(TLI), AA(AA), MSSA(MSSA), AC(AC), DL(DL),
         // Reuse ExpressionAllocator for PredicateInfo as well.
         PredInfo(
             std::make_unique<PredicateInfo>(F, *DT, *AC, ExpressionAllocator)),
@@ -1224,7 +1186,7 @@ NewGVN::ExprResult NewGVN::createExpression(Instruction *I) const {
       assert(E->getOperand(1)->getType() == I->getOperand(1)->getType() &&
              E->getOperand(2)->getType() == I->getOperand(2)->getType());
       Value *V = simplifySelectInst(E->getOperand(0), E->getOperand(1),
-                                    E->getOperand(2), Q);
+                                    E->getOperand(2), FastMathFlags(), Q);
       if (auto Simplified = checkExprResults(E, I, V))
         return Simplified;
     }
@@ -1439,7 +1401,7 @@ const Expression *NewGVN::performSymbolicStoreEvaluation(Instruction *I) const {
   auto *StoreAccess = getMemoryAccess(SI);
   // Get the expression, if any, for the RHS of the MemoryDef.
   const MemoryAccess *StoreRHS = StoreAccess->getDefiningAccess();
-  if (EnableStoreRefinement)
+  if (Opts.enable_store_refinement)
     StoreRHS = MSSAWalker->getClobberingMemoryAccess(StoreAccess);
   // If we bypassed the use-def chains, make sure we add a use.
   StoreRHS = lookupMemoryLeader(StoreRHS);
@@ -1646,10 +1608,6 @@ NewGVN::performSymbolicPredicateInfoEvaluation(BitCastInst *I) const {
 // Evaluate read only and pure calls, and create an expression result.
 NewGVN::ExprResult NewGVN::performSymbolicCallEvaluation(Instruction *I) const {
   auto *CI = cast<CallInst>(I);
-  if (auto *II = dyn_cast<IntrinsicInst>(I)) {
-    if (auto *ReturnedValue = II->getReturnedArgOperand())
-      return ExprResult::some(createVariableOrConstant(ReturnedValue));
-  }
 
   // FIXME: Currently the calls which may access the thread id may
   // be considered as not accessing the memory. But this is
@@ -1819,7 +1777,7 @@ NewGVN::performSymbolicPHIEvaluation(ArrayRef<ValPair> PHIOps,
   Value *AllSameValue = *(Filtered.begin());
   ++Filtered.begin();
   // Can't use std::equal here, sadly, because filter.begin moves.
-  if (llvm::all_of(Filtered, [&](Value *Arg) { return Arg == AllSameValue; })) {
+  if (llvm::all_of(Filtered, equal_to(AllSameValue))) {
     // Can't fold phi(undef, X) -> X unless X can't be poison (thus X is undef
     // in the worst case).
     if (HasUndef && !isGuaranteedNotToBePoison(AllSameValue, AC, nullptr, DT))
@@ -2070,6 +2028,7 @@ NewGVN::performSymbolicEvaluation(Instruction *I,
   case Instruction::FPTrunc:
   case Instruction::FPExt:
   case Instruction::PtrToInt:
+  case Instruction::PtrToAddr:
   case Instruction::IntToPtr:
   case Instruction::Select:
   case Instruction::ExtractElement:
@@ -2112,7 +2071,8 @@ void NewGVN::addAdditionalUsers(ExprResult &Res, Instruction *User) const {
   if (Res.PredDep) {
     if (const auto *PBranch = dyn_cast<PredicateBranch>(Res.PredDep))
       PredicateToUsers[PBranch->Condition].insert(User);
-    else if (const auto *PAssume = dyn_cast<PredicateAssume>(Res.PredDep))
+    else if (const auto *PAssume =
+                 dyn_cast<PredicateConditionAssume>(Res.PredDep))
       PredicateToUsers[PAssume->Condition].insert(User);
   }
   Res.PredDep = nullptr;
@@ -2618,8 +2578,8 @@ void NewGVN::addPhiOfOps(PHINode *Op, BasicBlock *BB,
       PHINodeUses.insert(UI);
 }
 
-static bool okayForPHIOfOps(const Instruction *I) {
-  if (!EnablePhiOfOps)
+static bool okayForPHIOfOps(const ScalarOptions &Opts, const Instruction *I) {
+  if (!Opts.enable_phi_of_ops)
     return false;
   return isa<BinaryOperator>(I) || isa<SelectInst>(I) || isa<CmpInst>(I) ||
          isa<LoadInst>(I);
@@ -2734,7 +2694,7 @@ Value *NewGVN::findLeaderForInst(Instruction *TransInst,
 const Expression *
 NewGVN::makePossiblePHIOfOps(Instruction *I,
                              SmallPtrSetImpl<Value *> &Visited) {
-  if (!okayForPHIOfOps(I))
+  if (!okayForPHIOfOps(Opts, I))
     return nullptr;
 
   if (!Visited.insert(I).second)
@@ -2956,7 +2916,7 @@ void NewGVN::initializeCongruenceClasses(Function &F) {
       if (isa<PHINode>(&I))
         for (auto *U : I.users())
           if (auto *UInst = dyn_cast<Instruction>(U))
-            if (InstrToDFSNum(UInst) != 0 && okayForPHIOfOps(UInst))
+            if (InstrToDFSNum(UInst) != 0 && okayForPHIOfOps(Opts, UInst))
               PHINodeUses.insert(UInst);
       // Don't insert void terminators into the class. We don't value number
       // them, and they just end up sitting in TOP.
@@ -3471,33 +3431,15 @@ bool NewGVN::runGVN() {
   unsigned ICount = 1;
   // Add an empty instruction to account for the fact that we start at 1
   DFSToInstr.emplace_back(nullptr);
-  // Note: We want ideal RPO traversal of the blocks, which is not quite the
-  // same as dominator tree order, particularly with regard whether backedges
-  // get visited first or second, given a block with multiple successors.
-  // If we visit in the wrong order, we will end up performing N times as many
+  // Note: Number the blocks in RPO to put every definition before its uses,
+  // except for a PHI operand arriving along a back edge. A wrong order costs
   // iterations.
-  // The dominator tree does guarantee that, for a given dom tree node, it's
-  // parent must occur before it in the RPO ordering. Thus, we only need to sort
-  // the siblings.
   ReversePostOrderTraversal<Function *> RPOT(&F);
   unsigned Counter = 0;
-  for (auto &B : RPOT) {
+  for (BasicBlock *B : RPOT) {
     auto *Node = DT->getNode(B);
     assert(Node && "RPO and Dominator tree should have same reachability");
     RPOOrdering[Node] = ++Counter;
-  }
-  // Sort dominator tree children arrays into RPO.
-  for (auto &B : RPOT) {
-    auto *Node = DT->getNode(B);
-    if (Node->getNumChildren() > 1)
-      llvm::sort(*Node, [&](const DomTreeNode *A, const DomTreeNode *B) {
-        return RPOOrdering[A] < RPOOrdering[B];
-      });
-  }
-
-  // Now a standard depth first ordering of the domtree is equivalent to RPO.
-  for (auto *DTN : depth_first(DT->getRootNode())) {
-    BasicBlock *B = DTN->getBlock();
     const auto &BlockRange = assignDFSNumbers(B, ICount);
     BlockInstRange.insert({B, BlockRange});
     ICount += BlockRange.second - BlockRange.first;
@@ -4284,9 +4226,9 @@ PreservedAnalyses NewGVNPass::run(Function &F, AnalysisManager<Function> &AM) {
   auto &TLI = AM.getResult<TargetLibraryAnalysis>(F);
   auto &AA = AM.getResult<AAManager>(F);
   auto &MSSA = AM.getResult<MemorySSAAnalysis>(F).getMSSA();
+  const ScalarOptions &Opts = getScalarOptions(F);
   bool Changed =
-      NewGVN(F, &DT, &AC, &TLI, &AA, &MSSA, F.getDataLayout())
-          .runGVN();
+      NewGVN(Opts, F, &DT, &AC, &TLI, &AA, &MSSA, F.getDataLayout()).runGVN();
   if (!Changed)
     return PreservedAnalyses::all();
   PreservedAnalyses PA;

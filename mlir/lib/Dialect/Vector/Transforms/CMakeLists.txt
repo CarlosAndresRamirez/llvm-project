@@ -1,19 +1,24 @@
-add_mlir_dialect_library(MLIRVectorTransforms
+set(LLVM_OPTIONAL_SOURCES
   BufferizableOpInterfaceImpl.cpp
+  )
+
+add_mlir_dialect_library(MLIRVectorTransforms
+  IndexedAccessOpInterfaceImpl.cpp
   LowerVectorBitCast.cpp
   LowerVectorBroadcast.cpp
   LowerVectorContract.cpp
-  LowerVectorFromElements.cpp
   LowerVectorGather.cpp
   LowerVectorInterleave.cpp
   LowerVectorMask.cpp
   LowerVectorMultiReduction.cpp
   LowerVectorScan.cpp
   LowerVectorShapeCast.cpp
+  LowerVectorShuffle.cpp
   LowerVectorStep.cpp
   LowerVectorToFromElementsToShuffleTree.cpp
   LowerVectorTransfer.cpp
   LowerVectorTranspose.cpp
+  MemorySlotInterfacesImpl.cpp
   SubsetOpInterfaceImpl.cpp
   VectorDistribute.cpp
   VectorDropLeadUnitDim.cpp
@@ -42,8 +47,9 @@ add_mlir_dialect_library(MLIRVectorTransforms
   MLIRGPUDialect
   MLIRGPUUtils
   MLIRIR
-  MLIRLinalgDialect
+  MLIRMemorySlotInterfaces
   MLIRMemRefDialect
+  MLIRMemRefTransforms
   MLIRMemRefUtils
   MLIRSCFDialect
   MLIRSideEffectInterfaces
@@ -53,4 +59,17 @@ add_mlir_dialect_library(MLIRVectorTransforms
   MLIRVectorDialect
   MLIRVectorInterfaces
   MLIRVectorUtils
+  )
+
+add_mlir_dialect_library(MLIRVectorBufferizableOpInterfaceImpl
+  BufferizableOpInterfaceImpl.cpp
+
+  ADDITIONAL_HEADER_DIRS
+  ${MLIR_MAIN_INCLUDE_DIR}/mlir/Dialect/Vector/Transforms
+
+  LINK_LIBS PUBLIC
+  MLIRBufferizationDialect
+  MLIRDestinationStyleOpInterface
+  MLIRIR
+  MLIRVectorDialect
   )

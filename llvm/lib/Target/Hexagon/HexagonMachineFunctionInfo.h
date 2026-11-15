@@ -9,10 +9,17 @@
 #ifndef LLVM_LIB_TARGET_HEXAGON_HEXAGONMACHINEFUNCTIONINFO_H
 #define LLVM_LIB_TARGET_HEXAGON_HEXAGONMACHINEFUNCTIONINFO_H
 
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/CodeGen/MIRYamlMapping.h"
+#include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include <map>
 
 namespace llvm {
+
+namespace yaml {
+struct HexagonFunctionInfo;
+} // end namespace yaml
 
 namespace Hexagon {
 
@@ -34,6 +41,10 @@ class HexagonMachineFunctionInfo : public MachineFunctionInfo {
   int LastNamedArgFrameIndex;
   bool HasClobberLR = false;
   bool HasEHReturn = false;
+  MachineFrameInfo VTCMFrameInfo{Align(2048), false, false};
+  DenseMap<int, int> VTCMMap;
+  // Size of the largest outgoing HLX argument area on the VTCM stack.
+  unsigned MaxVTCMCallFrameSize = 0;
   std::map<const MachineInstr*, unsigned> PacketInfo;
   virtual void anchor();
 
@@ -43,10 +54,14 @@ public:
   HexagonMachineFunctionInfo(const Function &F,
                              const TargetSubtargetInfo *STI) {}
 
+  HexagonMachineFunctionInfo(const HexagonMachineFunctionInfo &Other);
+
   MachineFunctionInfo *
   clone(BumpPtrAllocator &Allocator, MachineFunction &DestMF,
         const DenseMap<MachineBasicBlock *, MachineBasicBlock *> &Src2DstMBB)
       const override;
+
+  void initializeBaseYamlFields(const yaml::HexagonFunctionInfo &YamlMFI);
 
   unsigned getSRetReturnReg() const { return SRetReturnReg; }
   void setSRetReturnReg(unsigned Reg) { SRetReturnReg = Reg; }
@@ -85,7 +100,50 @@ public:
 
   void setStackAlignBaseReg(Register R) { StackAlignBaseReg = R; }
   Register getStackAlignBaseReg() const { return StackAlignBaseReg; }
+
+  MachineFrameInfo &getVTCMFrameInfo() { return VTCMFrameInfo; }
+  const MachineFrameInfo &getVTCMFrameInfo() const { return VTCMFrameInfo; }
+
+  void moveToVTCMStack(int From, int To) { VTCMMap.insert({From, To}); }
+  bool isVTCMStackIndex(int ObjectIdx) const {
+    return VTCMMap.contains(ObjectIdx);
+  }
+  int getMappedVTCMObjectIndex(int ObjectIdx) const {
+    return VTCMMap.lookup(ObjectIdx);
+  }
+  int64_t getMappedVTCMObjectOffset(int ObjectIdx) const {
+    return VTCMFrameInfo.getObjectOffset(getMappedVTCMObjectIndex(ObjectIdx));
+  }
+
+  unsigned getMaxVTCMCallFrameSize() const { return MaxVTCMCallFrameSize; }
+  void reserveVTCMCallFrame(unsigned Size) {
+    MaxVTCMCallFrameSize = std::max(MaxVTCMCallFrameSize, Size);
+  }
 };
+
+namespace yaml {
+
+/// Hexagon-specific MachineFunction properties for YAML serialization.
+struct HexagonFunctionInfo final : public yaml::MachineFunctionInfo {
+  StringValue StackAlignBaseReg;
+  unsigned MaxVTCMCallFrameSize = 0;
+
+  HexagonFunctionInfo() = default;
+  HexagonFunctionInfo(const llvm::HexagonMachineFunctionInfo &MFI,
+                      const TargetRegisterInfo &TRI);
+
+  void mappingImpl(yaml::IO &YamlIO) override;
+  ~HexagonFunctionInfo() override = default;
+};
+
+template <> struct MappingTraits<HexagonFunctionInfo> {
+  static void mapping(IO &YamlIO, HexagonFunctionInfo &MFI) {
+    YamlIO.mapOptional("stackAlignBaseReg", MFI.StackAlignBaseReg);
+    YamlIO.mapOptional("maxVTCMCallFrameSize", MFI.MaxVTCMCallFrameSize, 0u);
+  }
+};
+
+} // end namespace yaml
 
 } // end namespace llvm
 

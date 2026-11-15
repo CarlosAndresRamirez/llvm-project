@@ -13,14 +13,12 @@
 
 #include "llvm/Remarks/YAMLRemarkSerializer.h"
 #include "llvm/Remarks/Remark.h"
-#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
 #include <optional>
 
 using namespace llvm;
 using namespace llvm::remarks;
 
-// Use the same keys whether we use a string table or not (respectively, T is an
-// unsigned or a StringRef).
 static void
 mapRemarkHeader(yaml::IO &io, StringRef PassName, StringRef RemarkName,
                 std::optional<RemarkLocation> RL, StringRef FunctionName,
@@ -116,11 +114,13 @@ template <> struct MappingTraits<Argument> {
   static void mapping(IO &io, Argument &A) {
     assert(io.outputting() && "input not yet implemented");
 
+    // NB: A.Key.data() is not necessarily null-terminated, as the StringRef may
+    // be a span into the middle of a string.
     if (StringRef(A.Val).count('\n') > 1) {
       StringBlockVal S(A.Val);
-      io.mapRequired(A.Key.data(), S);
+      io.mapRequired(A.Key, S);
     } else {
-      io.mapRequired(A.Key.data(), A.Val);
+      io.mapRequired(A.Key, A.Val);
     }
     io.mapOptional("DebugLoc", A.Loc);
   }
@@ -131,10 +131,13 @@ template <> struct MappingTraits<Argument> {
 
 LLVM_YAML_IS_SEQUENCE_VECTOR(Argument)
 
-YAMLRemarkSerializer::YAMLRemarkSerializer(raw_ostream &OS, SerializerMode Mode,
-                                           std::optional<StringTable> StrTabIn)
-    : RemarkSerializer(Format::YAML, OS, Mode),
-      YAMLOutput(OS, reinterpret_cast<void *>(this)) {
+YAMLRemarkSerializer::YAMLRemarkSerializer(raw_ostream &OS)
+    : RemarkSerializer(Format::YAML, OS),
+      YAMLOutput(OS, reinterpret_cast<void *>(this)) {}
+
+YAMLRemarkSerializer::YAMLRemarkSerializer(raw_ostream &OS,
+                                           StringTable StrTabIn)
+    : YAMLRemarkSerializer(OS) {
   StrTab = std::move(StrTabIn);
 }
 
@@ -145,8 +148,9 @@ void YAMLRemarkSerializer::emit(const Remark &Remark) {
   YAMLOutput << R;
 }
 
-std::unique_ptr<MetaSerializer> YAMLRemarkSerializer::metaSerializer(
-    raw_ostream &OS, std::optional<StringRef> ExternalFilename) {
+std::unique_ptr<MetaSerializer>
+YAMLRemarkSerializer::metaSerializer(raw_ostream &OS,
+                                     StringRef ExternalFilename) {
   return std::make_unique<YAMLMetaSerializer>(OS, ExternalFilename);
 }
 
@@ -166,10 +170,10 @@ static void emitVersion(raw_ostream &OS) {
 
 static void emitExternalFile(raw_ostream &OS, StringRef Filename) {
   // Emit the null-terminated absolute path to the remark file.
-  SmallString<128> FilenameBuf = Filename;
-  sys::fs::make_absolute(FilenameBuf);
-  assert(!FilenameBuf.empty() && "The filename can't be empty.");
-  OS.write(FilenameBuf.data(), FilenameBuf.size());
+  assert(!Filename.empty() && "The filename can't be empty.");
+  assert((Filename == "-" || sys::path::is_absolute(Filename)) &&
+         "The remarks filename must be absolute.");
+  OS.write(Filename.data(), Filename.size());
   OS.write('\0');
 }
 
@@ -186,6 +190,5 @@ void YAMLMetaSerializer::emit() {
   support::endian::write64le(StrTabSizeBuf.data(), StrTabSize);
 
   OS.write(StrTabSizeBuf.data(), StrTabSizeBuf.size());
-  if (ExternalFilename)
-    emitExternalFile(OS, *ExternalFilename);
+  emitExternalFile(OS, ExternalFilename);
 }

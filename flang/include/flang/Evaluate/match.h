@@ -11,6 +11,7 @@
 #include "flang/Common/Fortran-consts.h"
 #include "flang/Common/visit.h"
 #include "flang/Evaluate/expression.h"
+#include "flang/Support/Fortran.h"
 #include "llvm/ADT/STLExtras.h"
 
 #include <tuple>
@@ -35,19 +36,13 @@ struct IsOperation<T, std::void_t<decltype(T::operands)>> {
 template <typename T>
 constexpr bool is_operation_v{detail::IsOperation<T>::value};
 
-template <common::TypeCategory C, int K>
-const evaluate::Expr<Type<C, K>> &deparen(const evaluate::Expr<Type<C, K>> &x) {
-  if (auto *parens{std::get_if<Parentheses<Type<C, K>>>(&x.u)}) {
+template <common::TypeCategory C>
+const evaluate::Expr<Type<C>> &deparen(const evaluate::Expr<Type<C>> &x) {
+  if (auto *parens{std::get_if<Parentheses<Type<C>>>(&x.u)}) {
     return deparen(parens->template operand<0>());
   } else {
     return x;
   }
-}
-
-template <common::TypeCategory C>
-const evaluate::Expr<SomeKind<C>> &deparen(
-    const evaluate::Expr<SomeKind<C>> &x) {
-  return x;
 }
 
 // Some expressions (e.g. TypelessExpression) don't allow parentheses, while
@@ -86,9 +81,12 @@ template <typename T> struct TypePattern {
   mutable const MatchType *ref{nullptr};
 };
 
-/// Matches one of the patterns provided as template arguments. All of these
-/// patterns should have the same number of operands, i.e. they all should
-/// try to match input expression with the same number of children, i.e.
+/// Matches one of the patterns provided as template arguments.
+/// Upon creation of an AnyOfPattern object with some arguments, say args,
+/// each of the pattern objects will be created using args as arguments to
+/// the constructor. This means that each of the patterns should be
+/// constructible from args, in particular all patterns should take the same
+/// number of inputs. So, for example,
 /// AnyOfPattern<SomeBinaryOp, OtherBinaryOp> is ok, whereas
 /// AnyOfPattern<SomeBinaryOp, SomeTernaryOp> is not.
 template <typename... Patterns> struct AnyOfPattern {
@@ -136,11 +134,11 @@ public:
 };
 
 /// Matches any input of type Expr<T>
-/// The indent if this pattern is to be a leaf in multi-operand patterns.
+/// The intent of this pattern is to be a leaf in multi-operand patterns.
 template <typename T> //
 struct ExprPattern : public TypePattern<evaluate::Expr<T>> {};
 
-/// Matches evaluate::Expr<T> that contains evaluate::Opreration<OpType>.
+/// Matches evaluate::Expr<T> that contains evaluate::Operation<OpType>.
 template <typename OpType, typename... Ops>
 struct OperationPattern : public TypePattern<OpType> {
 private:
@@ -178,8 +176,52 @@ public:
 };
 
 template <typename OpType, typename... Ops>
-OperationPattern(const Ops &...ops, llvm::type_identity<OpType>)
+OperationPattern(const Ops &..., llvm::type_identity<OpType>)
     -> OperationPattern<OpType, Ops...>;
+
+// Encode the actual operator in the type, so that the class is constructible
+// only from operand patterns. This will make it usable in AnyOfPattern.
+template <common::LogicalOperator Operator, typename ValType, typename... Ops>
+struct LogicalOperationPattern
+    : public OperationPattern<LogicalOperation, Ops...> {
+  using Base = OperationPattern<LogicalOperation, Ops...>;
+  static constexpr common::LogicalOperator opCode{Operator};
+
+private:
+  bool matchOp(const LogicalOperation &op) const {
+    return op.logicalOperator == opCode;
+  }
+  template <typename U> bool matchOp(const U &) const { return false; }
+
+public:
+  LogicalOperationPattern(const Ops &...ops, llvm::type_identity<ValType> = {})
+      : Base(ops...) {}
+
+  template <typename T> bool match(const evaluate::Expr<T> &input) const {
+    // The kind of a LogicalOperation is only known at runtime and always
+    // equals the kind of its enclosing Expr, so ValType can only be checked
+    // against the result type of the input expression.
+    if constexpr (std::is_same_v<T, ValType>) {
+      // All logical operations have the same operation type
+      // (LogicalOperation), so type-based matching cannot tell specific
+      // operations from one another.
+      // Check the operation code first, if that matches then use the
+      // base class's match.
+      if (common::visit(
+              [&](auto &&s) { return matchOp(s); }, deparen(input).u)) {
+        return Base::match(input);
+      }
+    }
+    return false;
+  }
+
+  template <typename U> bool match(const U &input) const { //
+    return false;
+  }
+};
+
+// No deduction guide for LogicalOperationPattern, since the "Operator"
+// parameter cannot be deduced from the constructor arguments.
 
 // Namespace-level definitions
 
@@ -187,6 +229,15 @@ template <typename T> using Expr = ExprPattern<T>;
 
 template <typename OpType, typename... Ops>
 using Op = OperationPattern<OpType, Ops...>;
+
+template <common::LogicalOperator Operator, typename ValType, typename... Ops>
+using LogicalOp = LogicalOperationPattern<Operator, ValType, Ops...>;
+
+template <common::LogicalOperator Operator, typename Type, typename Op0,
+    typename Op1>
+LogicalOp<Operator, Type, Op0, Op1> logical(const Op0 &op0, const Op1 &op1) {
+  return LogicalOp<Operator, Type, Op0, Op1>(op0, op1);
+}
 
 template <typename Pattern, typename Input>
 bool match(const Pattern &pattern, const Input &input) {

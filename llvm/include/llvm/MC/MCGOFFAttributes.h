@@ -57,13 +57,12 @@ struct EDAttr {
   GOFF::ESDBindingAlgorithm BindAlgorithm = GOFF::ESD_BA_Concatenate;
   GOFF::ESDLoadingBehavior LoadBehavior = GOFF::ESD_LB_Initial;
   GOFF::ESDReserveQwords ReservedQwords = GOFF::ESD_RQ_0;
-  GOFF::ESDAlignment Alignment = GOFF::ESD_ALIGN_Doubleword;
   uint8_t FillByteValue = 0;
 };
 
 // Attributes for LD symbols.
 struct LDAttr {
-  bool IsRenamable = false;
+  bool IsRenameable = true;
   GOFF::ESDExecutable Executable = GOFF::ESD_EXE_Unspecified;
   GOFF::ESDBindingStrength BindingStrength = GOFF::ESD_BST_Strong;
   GOFF::ESDLinkageType Linkage = GOFF::ESD_LT_XPLink;
@@ -73,11 +72,23 @@ struct LDAttr {
 
 // Attributes for PR symbols.
 struct PRAttr {
-  bool IsRenamable = false;
+  bool IsRenameable = true;
   GOFF::ESDExecutable Executable = GOFF::ESD_EXE_Unspecified;
+  GOFF::ESDBindingStrength BindingStrength = GOFF::ESD_BST_Strong;
   GOFF::ESDLinkageType Linkage = GOFF::ESD_LT_XPLink;
   GOFF::ESDBindingScope BindingScope = GOFF::ESD_BSC_Unspecified;
   uint32_t SortKey = 0;
+};
+
+// Attributes for ER symbols.
+struct ERAttr {
+  bool IsRenameable = true;
+  bool IsIndirectReference = false;
+  GOFF::ESDExecutable Executable = GOFF::ESD_EXE_Unspecified;
+  GOFF::ESDBindingStrength BindingStrength = GOFF::ESD_BST_Strong;
+  GOFF::ESDLinkageType Linkage = GOFF::ESD_LT_XPLink;
+  GOFF::ESDAmode Amode;
+  GOFF::ESDBindingScope BindingScope = GOFF::ESD_BSC_Unspecified;
 };
 
 // Predefined GOFF class names.
@@ -85,6 +96,7 @@ constexpr StringLiteral CLASS_CODE = "C_CODE64";
 constexpr StringLiteral CLASS_WSA = "C_WSA64";
 constexpr StringLiteral CLASS_DATA = "C_DATA64";
 constexpr StringLiteral CLASS_PPA2 = "C_@@QPPA2";
+constexpr StringLiteral CLASS_SINIT = "C_@@SQINIT";
 
 } // namespace GOFF
 } // namespace llvm

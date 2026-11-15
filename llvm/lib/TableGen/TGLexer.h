@@ -19,8 +19,6 @@
 #include "llvm/Support/DataTypes.h"
 #include "llvm/Support/SMLoc.h"
 #include <cassert>
-#include <memory>
-#include <set>
 #include <string>
 
 namespace llvm {
@@ -140,6 +138,7 @@ enum TokKind {
   XInstances,
   XIf,
   XCond,
+  XSwitch,
   XEq,
   XIsA,
   XDag,
@@ -157,6 +156,7 @@ enum TokKind {
   XToLower,
   XToUpper,
   XRange,
+  XSort,
   XGetDagArg,
   XGetDagName,
   XSetDagArg,
@@ -207,18 +207,9 @@ class TGLexer {
   unsigned CurBuffer = 0;
 
 public:
-  typedef std::set<std::string> DependenciesSetTy;
-
-private:
-  /// Dependencies - This is the list of all included files.
-  DependenciesSetTy Dependencies;
-
-public:
   TGLexer(SourceMgr &SrcMgr, ArrayRef<std::string> Macros);
 
   tgtok::TokKind Lex() { return CurCode = LexToken(CurPtr == CurBuf.begin()); }
-
-  const DependenciesSetTy &getDependencies() const { return Dependencies; }
 
   tgtok::TokKind getCode() const { return CurCode; }
 

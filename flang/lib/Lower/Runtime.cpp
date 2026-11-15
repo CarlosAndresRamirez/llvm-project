@@ -14,16 +14,12 @@
 #include "flang/Optimizer/Builder/FIRBuilder.h"
 #include "flang/Optimizer/Builder/Runtime/RTBuilder.h"
 #include "flang/Optimizer/Builder/Todo.h"
-#include "flang/Optimizer/Dialect/FIROpsSupport.h"
 #include "flang/Parser/parse-tree.h"
-#include "flang/Runtime/misc-intrinsic.h"
 #include "flang/Runtime/pointer.h"
-#include "flang/Runtime/random.h"
 #include "flang/Runtime/stop.h"
-#include "flang/Runtime/time-intrinsic.h"
 #include "flang/Semantics/tools.h"
-#include "mlir/Dialect/OpenACC/OpenACC.h"
 #include "mlir/Dialect/OpenMP/OpenMPDialect.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "llvm/Support/Debug.h"
 #include <optional>
 
@@ -36,8 +32,11 @@ using namespace Fortran::runtime;
 static void genUnreachable(fir::FirOpBuilder &builder, mlir::Location loc) {
   mlir::Block *curBlock = builder.getBlock();
   mlir::Operation *parentOp = curBlock->getParentOp();
-  if (parentOp->getDialect()->getNamespace() ==
-      mlir::omp::OpenMPDialect::getDialectNamespace())
+
+  if (mlir::isa<mlir::scf::ExecuteRegionOp>(parentOp))
+    fir::UnreachableOp::create(builder, loc);
+  else if (parentOp->getDialect()->getNamespace() ==
+           mlir::omp::OpenMPDialect::getDialectNamespace())
     Fortran::lower::genOpenMPTerminator(builder, parentOp, loc);
   else if (Fortran::lower::isInsideOpenACCComputeConstruct(builder))
     Fortran::lower::genOpenACCTerminator(builder, parentOp, loc);
@@ -89,8 +88,7 @@ void Fortran::lower::genStopStatement(
           operands.push_back(cast);
         },
         [&](auto) {
-          mlir::emitError(loc, "unhandled expression in STOP");
-          std::exit(1);
+          fir::emitFatalError(loc, "unhandled expression in STOP");
         });
   } else {
     callee = fir::runtime::getRuntimeFunc<mkRTKey(StopStatement)>(loc, builder);
@@ -118,6 +116,7 @@ void Fortran::lower::genStopStatement(
   }
 
   fir::CallOp::create(builder, loc, callee, operands);
+
   auto blockIsUnterminated = [&builder]() {
     mlir::Block *currentBlock = builder.getBlock();
     return currentBlock->empty() ||
@@ -137,24 +136,6 @@ void Fortran::lower::genFailImageStatement(
   genUnreachable(builder, loc);
 }
 
-void Fortran::lower::genNotifyWaitStatement(
-    Fortran::lower::AbstractConverter &converter,
-    const Fortran::parser::NotifyWaitStmt &) {
-  TODO(converter.getCurrentLocation(), "coarray: NOTIFY WAIT runtime");
-}
-
-void Fortran::lower::genEventPostStatement(
-    Fortran::lower::AbstractConverter &converter,
-    const Fortran::parser::EventPostStmt &) {
-  TODO(converter.getCurrentLocation(), "coarray: EVENT POST runtime");
-}
-
-void Fortran::lower::genEventWaitStatement(
-    Fortran::lower::AbstractConverter &converter,
-    const Fortran::parser::EventWaitStmt &) {
-  TODO(converter.getCurrentLocation(), "coarray: EVENT WAIT runtime");
-}
-
 void Fortran::lower::genLockStatement(
     Fortran::lower::AbstractConverter &converter,
     const Fortran::parser::LockStmt &) {
@@ -167,38 +148,57 @@ void Fortran::lower::genUnlockStatement(
   TODO(converter.getCurrentLocation(), "coarray: UNLOCK runtime");
 }
 
-void Fortran::lower::genSyncAllStatement(
-    Fortran::lower::AbstractConverter &converter,
-    const Fortran::parser::SyncAllStmt &) {
-  TODO(converter.getCurrentLocation(), "coarray: SYNC ALL runtime");
-}
-
-void Fortran::lower::genSyncImagesStatement(
-    Fortran::lower::AbstractConverter &converter,
-    const Fortran::parser::SyncImagesStmt &) {
-  TODO(converter.getCurrentLocation(), "coarray: SYNC IMAGES runtime");
-}
-
-void Fortran::lower::genSyncMemoryStatement(
-    Fortran::lower::AbstractConverter &converter,
-    const Fortran::parser::SyncMemoryStmt &) {
-  TODO(converter.getCurrentLocation(), "coarray: SYNC MEMORY runtime");
-}
-
-void Fortran::lower::genSyncTeamStatement(
-    Fortran::lower::AbstractConverter &converter,
-    const Fortran::parser::SyncTeamStmt &) {
-  TODO(converter.getCurrentLocation(), "coarray: SYNC TEAM runtime");
-}
-
 void Fortran::lower::genPauseStatement(
     Fortran::lower::AbstractConverter &converter,
-    const Fortran::parser::PauseStmt &) {
+    const Fortran::parser::PauseStmt &stmt) {
+
   fir::FirOpBuilder &builder = converter.getFirOpBuilder();
   mlir::Location loc = converter.getCurrentLocation();
-  mlir::func::FuncOp callee =
-      fir::runtime::getRuntimeFunc<mkRTKey(PauseStatement)>(loc, builder);
-  fir::CallOp::create(builder, loc, callee, mlir::ValueRange{});
+  Fortran::lower::StatementContext stmtCtx;
+
+  llvm::SmallVector<mlir::Value> operands;
+  mlir::func::FuncOp callee;
+  mlir::FunctionType calleeType;
+
+  if (stmt.v.has_value()) {
+    const auto &code = stmt.v.value();
+    auto expr =
+        converter.genExprValue(*Fortran::semantics::GetExpr(code), stmtCtx);
+    expr.match(
+        // Character-valued expression -> call PauseStatementText (CHAR, LEN)
+        [&](const fir::CharBoxValue &x) {
+          callee = fir::runtime::getRuntimeFunc<mkRTKey(PauseStatementText)>(
+              loc, builder);
+          calleeType = callee.getFunctionType();
+
+          operands.push_back(
+              builder.createConvert(loc, calleeType.getInput(0), x.getAddr()));
+          operands.push_back(
+              builder.createConvert(loc, calleeType.getInput(1), x.getLen()));
+        },
+        // Unboxed value -> call PauseStatementInt which accepts an integer.
+        [&](fir::UnboxedValue x) {
+          callee = fir::runtime::getRuntimeFunc<mkRTKey(PauseStatementInt)>(
+              loc, builder);
+          calleeType = callee.getFunctionType();
+          assert(calleeType.getNumInputs() >= 1);
+          mlir::Value cast =
+              builder.createConvert(loc, calleeType.getInput(0), x);
+          operands.push_back(cast);
+        },
+        [&](auto) {
+          fir::emitFatalError(loc, "unhandled expression in PAUSE");
+        });
+  } else {
+    callee =
+        fir::runtime::getRuntimeFunc<mkRTKey(PauseStatement)>(loc, builder);
+    calleeType = callee.getFunctionType();
+  }
+
+  fir::CallOp::create(builder, loc, callee, operands);
+
+  // NOTE: PAUSE does not terminate the current block. The program may resume
+  // and continue normal execution, so we do not emit control-flow terminators.
 }
 
 void Fortran::lower::genPointerAssociate(fir::FirOpBuilder &builder,

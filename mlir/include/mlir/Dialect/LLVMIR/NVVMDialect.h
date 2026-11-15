@@ -14,46 +14,17 @@
 #ifndef MLIR_DIALECT_LLVMIR_NVVMDIALECT_H_
 #define MLIR_DIALECT_LLVMIR_NVVMDIALECT_H_
 
-#include "mlir/Bytecode/BytecodeOpInterface.h"
-#include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/BasicPtxBuilderInterface.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/LLVMIR/NVVMAttributes.h"
 #include "mlir/Dialect/LLVMIR/NVVMRequiresSMTraits.h"
-#include "mlir/IR/Dialect.h"
 #include "mlir/IR/OpDefinition.h"
-#include "mlir/Interfaces/InferIntRangeInterface.h"
-#include "mlir/Interfaces/SideEffectInterfaces.h"
-#include "mlir/Target/LLVMIR/ModuleTranslation.h"
 #include "llvm/IR/IntrinsicsNVPTX.h"
-
-#include "mlir/Dialect/LLVMIR/NVVMOpsEnums.h.inc"
 
 namespace mlir {
 namespace NVVM {
-
 // Shared memory has 128-bit alignment
 constexpr int kSharedMemoryAlignmentBit = 128;
-
-/// NVVM memory space identifiers.
-enum NVVMMemorySpace {
-  /// Generic memory space identifier.
-  kGenericMemorySpace = 0,
-  /// Global memory space identifier.
-  kGlobalMemorySpace = 1,
-  /// Shared memory space identifier.
-  kSharedMemorySpace = 3,
-  /// Constant memory space identifier.
-  kConstantMemorySpace = 4,
-  /// Local memory space identifier.
-  kLocalMemorySpace = 5,
-  /// Tensor memory space identifier.
-  /// Tensor memory is available only in arch-accelerated
-  /// variants from sm100 onwards.
-  kTensorMemorySpace = 6,
-  /// Distributed shared memory space identifier.
-  /// Distributed shared memory is available only in sm90+.
-  kSharedClusterMemorySpace = 7,
-};
 
 /// A pair type of LLVM's Intrinsic ID and args (which are llvm values).
 /// This type is returned by the getIntrinsicIDAndArgs() methods.
@@ -68,15 +39,12 @@ std::pair<mlir::Type, unsigned> inferMMAType(mlir::NVVM::MMATypes type,
                                              int nCol,
                                              mlir::MLIRContext *context);
 } // namespace NVVM
+namespace LLVM {
+class ModuleTranslation;
+} // namespace LLVM
 } // namespace mlir
-
-///// Ops /////
-#define GET_ATTRDEF_CLASSES
-#include "mlir/Dialect/LLVMIR/NVVMOpsAttributes.h.inc"
 
 #define GET_OP_CLASSES
 #include "mlir/Dialect/LLVMIR/NVVMOps.h.inc"
-
-#include "mlir/Dialect/LLVMIR/NVVMOpsDialect.h.inc"
 
 #endif /* MLIR_DIALECT_LLVMIR_NVVMDIALECT_H_ */

@@ -30,6 +30,15 @@
 
 extern "C" {
 
+/// Definitions
+///{
+
+// See definition in OpenMP (omp.h.var/omp_lib.(F90|h).var)
+#define omp_initial_device -1
+#define omp_invalid_device -2
+
+///}
+
 /// Type declarations
 ///{
 
@@ -40,7 +49,7 @@ typedef void *omp_depend_t;
 /// API declarations
 ///{
 
-int omp_get_default_device(void) __attribute__((weak));
+int omp_get_default_device(void);
 
 ///}
 
@@ -81,17 +90,17 @@ typedef enum omp_interop_rc {
 } omp_interop_rc_t;
 
 /* Foreign runtime values from OpenMP Additional Definitions document v2.1 */
-typedef enum tgt_foreign_runtime_id_t {
-  tgt_fr_none = 0,
-  tgt_fr_cuda = 1,
-  tgt_fr_cuda_driver = 2,
-  tgt_fr_opencl = 3,
-  tgt_fr_sycl = 4,
-  tgt_fr_hip = 5,
-  tgt_fr_level_zero = 6,
-  tgt_fr_hsa = 7,
-  tgt_fr_last = 8
-} tgt_foreign_runtime_id_t;
+typedef enum omp_foreign_runtime_id_t {
+  omp_ifr_none = 0,
+  omp_ifr_cuda = 1,
+  omp_ifr_cuda_driver = 2,
+  omp_ifr_opencl = 3,
+  omp_ifr_sycl = 4,
+  omp_ifr_hip = 5,
+  omp_ifr_level_zero = 6,
+  omp_ifr_hsa = 7,
+  omp_ifr_last = 8
+} omp_foreign_runtime_id_t;
 
 typedef void *omp_interop_t;
 

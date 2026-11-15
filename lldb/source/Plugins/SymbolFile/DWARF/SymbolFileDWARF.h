@@ -60,6 +60,7 @@ class DWARFTypeUnit;
 class SymbolFileDWARFDebugMap;
 class SymbolFileDWARFDwo;
 class SymbolFileDWARFDwp;
+struct StandaloneDWARFLineTableInfo;
 
 #define DIE_IS_BEING_PARSED ((lldb_private::Type *)1)
 
@@ -82,6 +83,7 @@ public:
   friend class DWARFCompileUnit;
   friend class DWARFDIE;
   friend class DWARFASTParser;
+  friend struct StandaloneDWARFLineTableInfo;
 
   // Static Functions
   static void Initialize();
@@ -93,6 +95,8 @@ public:
   static llvm::StringRef GetPluginNameStatic() { return "dwarf"; }
 
   static llvm::StringRef GetPluginDescriptionStatic();
+
+  static llvm::StringRef GetDwoDiagnosticSuffix();
 
   static SymbolFile *CreateInstance(lldb::ObjectFileSP objfile_sp);
 
@@ -110,7 +114,7 @@ public:
 
   lldb::LanguageType ParseLanguage(CompileUnit &comp_unit) override;
 
-  XcodeSDK ParseXcodeSDK(CompileUnit &comp_unit) override;
+  XcodeSDKAndSysroot ParseXcodeSDK(CompileUnit &comp_unit) override;
 
   size_t ParseFunctions(CompileUnit &comp_unit) override;
 
@@ -277,16 +281,20 @@ public:
 
   void Dump(Stream &s) override;
 
-  void DumpClangAST(Stream &s, llvm::StringRef filter) override;
+  void DumpClangAST(Stream &s, llvm::StringRef filter,
+                    bool show_colors) override;
+
+  lldb_private::ModuleSpecList GetSeparateDebugInfoFiles() override;
 
   /// List separate dwo files.
   bool GetSeparateDebugInfo(StructuredData::Dictionary &d, bool errors_only,
                             bool load_all_debug_info = false) override;
 
-  // Gets a pair of loaded and total dwo file counts.
-  // For split-dwarf files, this reports the counts for successfully loaded DWO
-  // CUs and total DWO CUs. For non-split-dwarf files, this reports 0 for both.
-  std::pair<uint32_t, uint32_t> GetDwoFileCounts() override;
+  /// Gets statistics about dwo files associated with this symbol file.
+  /// For split-dwarf files, this reports the counts for successfully loaded DWO
+  /// CUs, total DWO CUs, and the number of DWO CUs with loading errors.
+  /// For non-split-dwarf files, this reports 0 for all.
+  DWOStats GetDwoStats() override;
 
   DWARFContext &GetDWARFContext() { return m_context; }
 
@@ -328,7 +336,8 @@ public:
     return LLDB_INVALID_OFFSET;
   }
 
-  virtual bool ParseVendorDWARFOpcode(uint8_t op, const DataExtractor &opcodes,
+  virtual bool ParseVendorDWARFOpcode(uint8_t op,
+                                      const llvm::DataExtractor &opcodes,
                                       lldb::offset_t &offset,
                                       RegisterContext *reg_ctx,
                                       lldb::RegisterKind reg_kind,
@@ -373,12 +382,16 @@ public:
   /// Returns the DWARFIndex for this symbol, if it exists.
   DWARFIndex *getIndex() { return m_index.get(); }
 
+  lldb::TypeSP GetTypeEnclosingVariableUID(lldb::user_id_t uid) override;
+
 private:
   /// Find the definition DIE for the specified \c label in this
   /// SymbolFile.
   ///
   /// \returns A valid definition DIE on success.
-  DWARFDIE FindFunctionDefinition(const FunctionCallLabel &label);
+  llvm::Expected<DWARFDIE>
+  FindFunctionDefinition(const FunctionCallLabel &label,
+                         const DWARFDIE &declaration);
 
 protected:
   SymbolFileDWARF(const SymbolFileDWARF &) = delete;
@@ -445,7 +458,7 @@ protected:
                                         DIEArray &&variable_dies);
 
   llvm::Expected<SymbolContext>
-  ResolveFunctionCallLabel(const FunctionCallLabel &label) override;
+  ResolveFunctionCallLabel(FunctionCallLabel &label) override;
 
   // Given a die_offset, figure out the symbol context representing that die.
   bool ResolveFunction(const DWARFDIE &die, bool include_inlines,
@@ -507,6 +520,13 @@ protected:
   void BuildCuTranslationTable();
   std::optional<uint32_t> GetDWARFUnitIndex(uint32_t cu_idx);
 
+  bool MissingDebugInfo();
+
+  /// Return standalone line-table information when there is a .debug_line
+  /// section without a .debug_info section. Returns nullptr when .debug_info
+  /// is present.
+  StandaloneDWARFLineTableInfo *GetStandaloneLineTableInfo();
+
   void FindDwpSymbolFile();
 
   const SupportFileList *GetTypeUnitSupportFiles(DWARFTypeUnit &tu);
@@ -528,6 +548,9 @@ protected:
 
   llvm::once_flag m_info_once_flag;
   std::unique_ptr<DWARFDebugInfo> m_info;
+
+  llvm::once_flag m_standalone_line_table_once_flag;
+  std::unique_ptr<StandaloneDWARFLineTableInfo> m_standalone_line_table_info;
 
   std::unique_ptr<llvm::DWARFDebugAbbrev> m_abbr;
   std::unique_ptr<GlobalVariableMap> m_global_aranges_up;

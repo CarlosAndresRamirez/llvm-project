@@ -20,6 +20,7 @@
 #include "clang/Sema/Ownership.h"
 #include "clang/Sema/Scope.h"
 #include "clang/Sema/ScopeInfo.h"
+#include "clang/Sema/SemaBPF.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSet.h"
@@ -260,10 +261,7 @@ ExprResult Sema::ActOnGCCAsmStmtString(Expr *Expr, bool ForAsmLabel) {
     Diag(Expr->getBeginLoc(), diag::err_asm_operand_empty_string);
   }
 
-  ConstantExpr *Res = ConstantExpr::Create(getASTContext(), Expr,
-                                           ConstantResultStorageKind::APValue);
-  Res->SetResult(V, getASTContext());
-  return Res;
+  return ConstantExpr::Create(getASTContext(), Expr, V);
 }
 
 StmtResult Sema::ActOnGCCAsmStmt(SourceLocation AsmLoc, bool IsSimple,
@@ -305,6 +303,12 @@ StmtResult Sema::ActOnGCCAsmStmt(SourceLocation AsmLoc, bool IsSimple,
 
     std::string ConstraintStr =
         GCCAsmStmt::ExtractStringFromGCCAsmStmtComponent(Constraint);
+
+    if (ConstraintStr.find('\0') != std::string::npos) {
+      Diag(Constraint->getBeginLoc(), diag::err_asm_constraint_embedded_null)
+          << /*output*/ 0;
+      return CreateGCCAsmStmt();
+    }
 
     TargetInfo::ConstraintInfo Info(ConstraintStr, OutputName);
     if (!Context.getTargetInfo().validateOutputConstraint(Info) &&
@@ -396,6 +400,12 @@ StmtResult Sema::ActOnGCCAsmStmt(SourceLocation AsmLoc, bool IsSimple,
     std::string ConstraintStr =
         GCCAsmStmt::ExtractStringFromGCCAsmStmtComponent(Constraint);
 
+    if (ConstraintStr.find('\0') != std::string::npos) {
+      Diag(Constraint->getBeginLoc(), diag::err_asm_constraint_embedded_null)
+          << /*input*/ 1;
+      return CreateGCCAsmStmt();
+    }
+
     TargetInfo::ConstraintInfo Info(ConstraintStr, InputName);
     if (!Context.getTargetInfo().validateInputConstraint(OutputConstraintInfos,
                                                          Info)) {
@@ -439,6 +449,9 @@ StmtResult Sema::ActOnGCCAsmStmt(SourceLocation AsmLoc, bool IsSimple,
         return StmtError();
 
       InputExpr = Exprs[i] = Result.get();
+
+      if (!Info.allowsRegister() && !Info.allowsMemory())
+        InputExpr = Exprs[i] = BPF().checkAsmImmediateOperand(InputExpr);
 
       if (Info.requiresImmediateConstant() && !Info.allowsRegister()) {
         if (!InputExpr->isValueDependent()) {
@@ -502,6 +515,12 @@ StmtResult Sema::ActOnGCCAsmStmt(SourceLocation AsmLoc, bool IsSimple,
 
     std::string Clobber =
         GCCAsmStmt::ExtractStringFromGCCAsmStmtComponent(ClobberExpr);
+
+    if (Clobber.find('\0') != std::string::npos) {
+      Diag(ClobberExpr->getBeginLoc(), diag::err_asm_constraint_embedded_null)
+          << /*clobber*/ 2;
+      return CreateGCCAsmStmt();
+    }
 
     if (!Context.getTargetInfo().isValidClobber(Clobber)) {
       targetDiag(ClobberExpr->getBeginLoc(),
@@ -717,10 +736,13 @@ StmtResult Sema::ActOnGCCAsmStmt(SourceLocation AsmLoc, bool IsSimple,
     if (!SmallerValueMentioned && !FPTiedToInt && InputDomain != AD_Other &&
         OutputConstraintInfos[TiedTo].allowsRegister()) {
 
-      // FIXME: GCC supports the OutSize to be 128 at maximum. Currently codegen
-      // crash when the size larger than the register size. So we limit it here.
-      if (OutTy->isStructureType() &&
-          Context.getIntTypeForBitwidth(OutSize, /*Signed*/ false).isNull()) {
+      // FIXME: GCC supports some non-scalar register outputs. Currently
+      // codegen crashes when the size cannot be represented by an integer type
+      // that fits in a general-purpose register.
+      bool FitsInGeneralPurposeRegister =
+          OutSize <= Context.getTargetInfo().getRegisterWidth() &&
+          !Context.getIntTypeForBitwidth(OutSize, /*Signed*/ false).isNull();
+      if (OutputDomain == AD_Other && !FitsInGeneralPurposeRegister) {
         targetDiag(OutputExpr->getExprLoc(), diag::err_store_value_to_reg);
         return NS;
       }
@@ -908,7 +930,7 @@ bool Sema::LookupInlineAsmField(StringRef Base, StringRef Member,
     LookupResult FieldResult(*this, &Context.Idents.get(NextMember),
                              SourceLocation(), LookupMemberName);
 
-    RecordDecl *RD = RT->getOriginalDecl()->getDefinitionOrSelf();
+    RecordDecl *RD = RT->getDecl()->getDefinitionOrSelf();
     if (!LookupQualifiedName(FieldResult, RD))
       return true;
 

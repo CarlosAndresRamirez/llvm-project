@@ -49,13 +49,6 @@ using namespace omp::target;
 
 namespace {
 
-bool isImageBitcode(const __tgt_device_image &Image) {
-  StringRef Binary(reinterpret_cast<const char *>(Image.ImageStart),
-                   utils::getPtrDiff(Image.ImageEnd, Image.ImageStart));
-
-  return identify_magic(Binary) == file_magic::bitcode;
-}
-
 Expected<std::unique_ptr<Module>>
 createModuleFromMemoryBuffer(std::unique_ptr<MemoryBuffer> &MB,
                              LLVMContext &Context) {
@@ -66,12 +59,10 @@ createModuleFromMemoryBuffer(std::unique_ptr<MemoryBuffer> &MB,
                                      "failed to create module");
   return std::move(Mod);
 }
-Expected<std::unique_ptr<Module>>
-createModuleFromImage(const __tgt_device_image &Image, LLVMContext &Context) {
-  StringRef Data((const char *)Image.ImageStart,
-                 utils::getPtrDiff(Image.ImageEnd, Image.ImageStart));
+Expected<std::unique_ptr<Module>> createModuleFromImage(StringRef Image,
+                                                        LLVMContext &Context) {
   std::unique_ptr<MemoryBuffer> MB = MemoryBuffer::getMemBuffer(
-      Data, /*BufferName=*/"", /*RequiresNullTerminator=*/false);
+      Image, /*BufferName=*/"", /*RequiresNullTerminator=*/false);
   return createModuleFromMemoryBuffer(MB, Context);
 }
 
@@ -113,7 +104,8 @@ createTargetMachine(Module &M, std::string CPU, unsigned OptLevel) {
 
   std::optional<CodeModel::Model> CodeModel = M.getCodeModel();
 
-  TargetOptions Options = codegen::InitTargetOptionsFromCodeGenFlags(TT);
+  TargetOptions Options =
+      codegen::getTargetOptions(M.getContext().getLibraryOptions(), TT);
 
   std::unique_ptr<TargetMachine> TM(
       T->createTargetMachine(M.getTargetTriple(), CPU, Features.getString(),
@@ -127,7 +119,6 @@ createTargetMachine(Module &M, std::string CPU, unsigned OptLevel) {
 } // namespace
 
 JITEngine::JITEngine(Triple::ArchType TA) : TT(Triple::getArchTypeName(TA)) {
-  codegen::RegisterCodeGenFlags();
 #ifdef LIBOMPTARGET_JIT_NVPTX
   if (TT.isNVPTX()) {
     LLVMInitializeNVPTXTargetInfo();
@@ -144,11 +135,18 @@ JITEngine::JITEngine(Triple::ArchType TA) : TT(Triple::getArchTypeName(TA)) {
     LLVMInitializeAMDGPUAsmPrinter();
   }
 #endif
+#ifdef LIBOMPTARGET_JIT_SPIRV
+  if (TT.isSPIRV()) {
+    LLVMInitializeSPIRVTargetInfo();
+    LLVMInitializeSPIRVTarget();
+    LLVMInitializeSPIRVTargetMC();
+    LLVMInitializeSPIRVAsmPrinter();
+  }
+#endif
 }
 
 void JITEngine::opt(TargetMachine *TM, TargetLibraryInfoImpl *TLII, Module &M,
                     unsigned OptLevel) {
-  PipelineTuningOptions PTO;
   std::optional<PGOOptions> PGOOpt;
 
   LoopAnalysisManager LAM;
@@ -157,7 +155,7 @@ void JITEngine::opt(TargetMachine *TM, TargetLibraryInfoImpl *TLII, Module &M,
   ModuleAnalysisManager MAM;
   ModulePassManager MPM;
 
-  PassBuilder PB(TM, PTO, PGOOpt, nullptr);
+  PassBuilder PB(M.getContext(), TM, std::nullopt, PGOOpt, nullptr);
 
   FAM.registerPass([&] { return TargetLibraryAnalysis(*TLII); });
 
@@ -189,9 +187,10 @@ Expected<std::unique_ptr<MemoryBuffer>>
 JITEngine::backend(Module &M, const std::string &ComputeUnitKind,
                    unsigned OptLevel) {
 
-  auto RemarksFileOrErr = setupLLVMOptimizationRemarks(
-      M.getContext(), /*RemarksFilename=*/"", /*RemarksPasses=*/"",
-      /*RemarksFormat=*/"", /*RemarksWithHotness=*/false);
+  Expected<LLVMRemarkFileHandle> RemarksFileOrErr =
+      setupLLVMOptimizationRemarks(
+          M.getContext(), /*RemarksFilename=*/"", /*RemarksPasses=*/"",
+          /*RemarksFormat=*/"", /*RemarksWithHotness=*/false);
   if (Error E = RemarksFileOrErr.takeError())
     return std::move(E);
   if (*RemarksFileOrErr)
@@ -238,7 +237,7 @@ JITEngine::backend(Module &M, const std::string &ComputeUnitKind,
 }
 
 Expected<std::unique_ptr<MemoryBuffer>>
-JITEngine::getOrCreateObjFile(const __tgt_device_image &Image, LLVMContext &Ctx,
+JITEngine::getOrCreateObjFile(StringRef Image, LLVMContext &Ctx,
                               const std::string &ComputeUnitKind) {
 
   // Check if the user replaces the module at runtime with a finished object.
@@ -277,58 +276,39 @@ JITEngine::getOrCreateObjFile(const __tgt_device_image &Image, LLVMContext &Ctx,
   return backend(*Mod, ComputeUnitKind, JITOptLevel);
 }
 
-Expected<const __tgt_device_image *>
-JITEngine::compile(const __tgt_device_image &Image,
-                   const std::string &ComputeUnitKind,
+Expected<std::unique_ptr<MemoryBuffer>>
+JITEngine::compile(StringRef Image, const std::string &ComputeUnitKind,
                    PostProcessingFn PostProcessing) {
   std::lock_guard<std::mutex> Lock(ComputeUnitMapMutex);
 
-  // Check if we JITed this image for the given compute unit kind before.
-  ComputeUnitInfo &CUI = ComputeUnitMap[ComputeUnitKind];
-  if (CUI.TgtImageMap.contains(&Image))
-    return CUI.TgtImageMap[&Image].get();
-
-  auto ObjMBOrErr = getOrCreateObjFile(Image, CUI.Context, ComputeUnitKind);
+  LLVMContext Ctz;
+  auto ObjMBOrErr = getOrCreateObjFile(Image, Ctz, ComputeUnitKind);
   if (!ObjMBOrErr)
     return ObjMBOrErr.takeError();
 
-  auto ImageMBOrErr = PostProcessing(std::move(*ObjMBOrErr));
-  if (!ImageMBOrErr)
-    return ImageMBOrErr.takeError();
-
-  CUI.JITImages.insert({&Image, std::move(*ImageMBOrErr)});
-  auto &ImageMB = CUI.JITImages[&Image];
-  CUI.TgtImageMap.insert({&Image, std::make_unique<__tgt_device_image>()});
-  auto &JITedImage = CUI.TgtImageMap[&Image];
-  *JITedImage = Image;
-  JITedImage->ImageStart = const_cast<char *>(ImageMB->getBufferStart());
-  JITedImage->ImageEnd = const_cast<char *>(ImageMB->getBufferEnd());
-
-  return JITedImage.get();
+  return PostProcessing(std::move(*ObjMBOrErr));
 }
 
-Expected<const __tgt_device_image *>
-JITEngine::process(const __tgt_device_image &Image,
-                   target::plugin::GenericDeviceTy &Device) {
-  const std::string &ComputeUnitKind = Device.getComputeUnitKind();
+Expected<std::unique_ptr<MemoryBuffer>>
+JITEngine::process(StringRef Image, target::plugin::GenericDeviceTy &Device) {
+  assert(identify_magic(Image) == file_magic::bitcode && "Image not LLVM-IR");
 
+  const std::string &ComputeUnitKind = Device.getComputeUnitKind();
   PostProcessingFn PostProcessing = [&Device](std::unique_ptr<MemoryBuffer> MB)
       -> Expected<std::unique_ptr<MemoryBuffer>> {
     return Device.doJITPostProcessing(std::move(MB));
   };
 
-  if (isImageBitcode(Image))
-    return compile(Image, ComputeUnitKind, PostProcessing);
+  auto ImageOrError = compile(Image, ComputeUnitKind, PostProcessing);
 
-  return &Image;
-}
-
-void JITEngine::erase(const __tgt_device_image &Image,
-                      target::plugin::GenericDeviceTy &Device) {
-  std::lock_guard<std::mutex> Lock(ComputeUnitMapMutex);
-  const std::string &ComputeUnitKind = Device.getComputeUnitKind();
-  ComputeUnitInfo &CUI = ComputeUnitMap[ComputeUnitKind];
-
-  CUI.TgtImageMap.erase(&Image);
-  CUI.JITImages.erase(&Image);
+  if (SaveImageFileName.isPresent() && ImageOrError) {
+    std::error_code EC;
+    raw_fd_ostream OS(SaveImageFileName.get(), EC);
+    if (EC)
+      return createStringError(error::ErrorCode::HOST_IO,
+                               "saving JIT image file\n");
+    OS << ImageOrError.get()->getBuffer();
+    OS.close();
+  }
+  return ImageOrError;
 }

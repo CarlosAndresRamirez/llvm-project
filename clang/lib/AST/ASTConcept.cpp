@@ -24,13 +24,18 @@ static void
 CreateUnsatisfiedConstraintRecord(const ASTContext &C,
                                   const UnsatisfiedConstraintRecord &Detail,
                                   UnsatisfiedConstraintRecord *TrailingObject) {
-  if (auto *E = dyn_cast<Expr *>(Detail))
+  if (Detail.isNull())
+    new (TrailingObject) UnsatisfiedConstraintRecord(nullptr);
+  else if (const auto *E = llvm::dyn_cast<const Expr *>(Detail))
     new (TrailingObject) UnsatisfiedConstraintRecord(E);
+  else if (const auto *Concept =
+               llvm::dyn_cast<const ConceptReference *>(Detail))
+    new (TrailingObject) UnsatisfiedConstraintRecord(Concept);
   else {
     auto &SubstitutionDiagnostic =
-        *cast<std::pair<SourceLocation, StringRef> *>(Detail);
+        *cast<const clang::ConstraintSubstitutionDiagnostic *>(Detail);
     StringRef Message = C.backupStr(SubstitutionDiagnostic.second);
-    auto *NewSubstDiag = new (C) std::pair<SourceLocation, StringRef>(
+    auto *NewSubstDiag = new (C) clang::ConstraintSubstitutionDiagnostic(
         SubstitutionDiagnostic.first, Message);
     new (TrailingObject) UnsatisfiedConstraintRecord(NewSubstDiag);
   }
@@ -38,9 +43,9 @@ CreateUnsatisfiedConstraintRecord(const ASTContext &C,
 
 ASTConstraintSatisfaction::ASTConstraintSatisfaction(
     const ASTContext &C, const ConstraintSatisfaction &Satisfaction)
-    : NumRecords{Satisfaction.Details.size()},
-      IsSatisfied{Satisfaction.IsSatisfied}, ContainsErrors{
-                                                 Satisfaction.ContainsErrors} {
+    : NumRecords(Satisfaction.Details.size()),
+      IsSatisfied(Satisfaction.IsSatisfied),
+      ContainsErrors(Satisfaction.ContainsErrors) {
   for (unsigned I = 0; I < NumRecords; ++I)
     CreateUnsatisfiedConstraintRecord(C, Satisfaction.Details[I],
                                       getTrailingObjects() + I);
@@ -48,9 +53,9 @@ ASTConstraintSatisfaction::ASTConstraintSatisfaction(
 
 ASTConstraintSatisfaction::ASTConstraintSatisfaction(
     const ASTContext &C, const ASTConstraintSatisfaction &Satisfaction)
-    : NumRecords{Satisfaction.NumRecords},
-      IsSatisfied{Satisfaction.IsSatisfied},
-      ContainsErrors{Satisfaction.ContainsErrors} {
+    : NumRecords(Satisfaction.NumRecords),
+      IsSatisfied(Satisfaction.IsSatisfied),
+      ContainsErrors(Satisfaction.ContainsErrors) {
   for (unsigned I = 0; I < NumRecords; ++I)
     CreateUnsatisfiedConstraintRecord(C, *(Satisfaction.begin() + I),
                                       getTrailingObjects() + I);
@@ -74,9 +79,10 @@ ASTConstraintSatisfaction *ASTConstraintSatisfaction::Rebuild(
   return new (Mem) ASTConstraintSatisfaction(C, Satisfaction);
 }
 
-void ConstraintSatisfaction::Profile(
-    llvm::FoldingSetNodeID &ID, const ASTContext &C,
-    const NamedDecl *ConstraintOwner, ArrayRef<TemplateArgument> TemplateArgs) {
+void ConstraintSatisfaction::Profile(llvm::FoldingSetNodeID &ID,
+                                     const ASTContext &C,
+                                     const NamedDecl *ConstraintOwner,
+                                     ArrayRef<TemplateArgument> TemplateArgs) {
   ID.AddPointer(ConstraintOwner);
   ID.AddInteger(TemplateArgs.size());
   for (auto &Arg : TemplateArgs)
@@ -87,8 +93,12 @@ ConceptReference *
 ConceptReference::Create(const ASTContext &C, NestedNameSpecifierLoc NNS,
                          SourceLocation TemplateKWLoc,
                          DeclarationNameInfo ConceptNameInfo,
-                         NamedDecl *FoundDecl, TemplateDecl *NamedConcept,
+                         NamedDecl *FoundDecl, TemplateName NamedConcept,
                          const ASTTemplateArgumentListInfo *ArgsAsWritten) {
+
+  assert(NamedConcept.isConceptName() &&
+         "concept reference does not name a concept");
+
   return new (C) ConceptReference(NNS, TemplateKWLoc, ConceptNameInfo,
                                   FoundDecl, NamedConcept, ArgsAsWritten);
 }
@@ -103,7 +113,7 @@ SourceLocation ConceptReference::getBeginLoc() const {
 void ConceptReference::print(llvm::raw_ostream &OS,
                              const PrintingPolicy &Policy) const {
   NestedNameSpec.getNestedNameSpecifier().print(OS, Policy);
-  ConceptName.printName(OS, Policy);
+  NamedConcept.print(OS, Policy, TemplateName::Qualified::None);
   if (hasExplicitTemplateArgs()) {
     OS << "<";
     llvm::ListSeparator Sep(", ");
@@ -114,6 +124,19 @@ void ConceptReference::print(llvm::raw_ostream &OS,
     }
     OS << ">";
   }
+}
+
+const StreamingDiagnostic &clang::operator<<(const StreamingDiagnostic &DB,
+                                             const ConceptReference *C) {
+  std::string NameStr;
+  llvm::raw_string_ostream OS(NameStr);
+  LangOptions LO;
+  LO.CPlusPlus = true;
+  LO.Bool = true;
+  OS << '\'';
+  C->print(OS, PrintingPolicy(LO));
+  OS << '\'';
+  return DB << NameStr;
 }
 
 concepts::ExprRequirement::ExprRequirement(

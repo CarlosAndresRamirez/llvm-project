@@ -69,6 +69,45 @@ target triple = "x86_64-unknown-linux-gnu"
   ptr @.str.9
 ], align 16
 
+@table3 = internal constant [2 x ptr] [
+  ptr @.str.8,
+  ptr @.str.9
+], align 16
+
+@table4 = internal constant [2 x ptr] [
+  ptr @.str.8,
+  ptr @.str.9
+], align 16
+
+@table5 = internal constant [2 x ptr] [
+  ptr @.str.8,
+  ptr @.str.9
+], align 16
+
+@skip.table = internal constant [4 x ptr] [
+  ptr @.str.8,
+  ptr null,
+  ptr @.str.9,
+  ptr null
+], align 16
+
+@wrong.skip.table = internal constant [4 x ptr] [
+  ptr null,
+  ptr @.str.8,
+  ptr null,
+  ptr @.str.9
+], align 16
+
+@table.multiple.load.uses = internal constant [2 x ptr] [
+  ptr @.str.8,
+  ptr @.str.9
+], align 16
+
+@table.volatile = internal constant [2 x ptr] [
+  ptr @.str.8,
+  ptr @.str.9
+], align 16
+
 ;.
 ; CHECK: @.str = private unnamed_addr constant [5 x i8] c"zero\00", align 1
 ; CHECK: @.str.1 = private unnamed_addr constant [4 x i8] c"one\00", align 1
@@ -97,6 +136,13 @@ target triple = "x86_64-unknown-linux-gnu"
 ; CHECK: @user_defined_lookup_table.table.rel = internal unnamed_addr constant [3 x i32] [i32 trunc (i64 sub (i64 ptrtoint (ptr @.str to i64), i64 ptrtoint (ptr @user_defined_lookup_table.table.rel to i64)) to i32), i32 trunc (i64 sub (i64 ptrtoint (ptr @.str.1 to i64), i64 ptrtoint (ptr @user_defined_lookup_table.table.rel to i64)) to i32), i32 trunc (i64 sub (i64 ptrtoint (ptr @.str.2 to i64), i64 ptrtoint (ptr @user_defined_lookup_table.table.rel to i64)) to i32)], align 4
 ; CHECK: @table.rel = internal unnamed_addr constant [2 x i32] [i32 trunc (i64 sub (i64 ptrtoint (ptr @.str.8 to i64), i64 ptrtoint (ptr @table.rel to i64)) to i32), i32 trunc (i64 sub (i64 ptrtoint (ptr @.str.9 to i64), i64 ptrtoint (ptr @table.rel to i64)) to i32)], align 4
 ; CHECK: @table2.rel = internal unnamed_addr constant [2 x i32] [i32 trunc (i64 sub (i64 ptrtoint (ptr @.str.8 to i64), i64 ptrtoint (ptr @table2.rel to i64)) to i32), i32 trunc (i64 sub (i64 ptrtoint (ptr @.str.9 to i64), i64 ptrtoint (ptr @table2.rel to i64)) to i32)], align 4
+; CHECK: @table3.rel = internal unnamed_addr constant [2 x i32] [i32 trunc (i64 sub (i64 ptrtoint (ptr @.str.8 to i64), i64 ptrtoint (ptr @table3.rel to i64)) to i32), i32 trunc (i64 sub (i64 ptrtoint (ptr @.str.9 to i64), i64 ptrtoint (ptr @table3.rel to i64)) to i32)], align 4
+; CHECK: @table4 = internal constant [2 x ptr] [ptr @.str.8, ptr @.str.9], align 16
+; CHECK: @table5 = internal constant [2 x ptr] [ptr @.str.8, ptr @.str.9], align 16
+; CHECK: @skip.table.rel = internal unnamed_addr constant [2 x i32] [i32 trunc (i64 sub (i64 ptrtoint (ptr @.str.8 to i64), i64 ptrtoint (ptr @skip.table.rel to i64)) to i32), i32 trunc (i64 sub (i64 ptrtoint (ptr @.str.9 to i64), i64 ptrtoint (ptr @skip.table.rel to i64)) to i32)], align 4
+; CHECK: @wrong.skip.table = internal constant [4 x ptr] [ptr null, ptr @.str.8, ptr null, ptr @.str.9], align 16
+; CHECK: @table.multiple.load.uses.rel = internal unnamed_addr constant [2 x i32] [i32 trunc (i64 sub (i64 ptrtoint (ptr @.str.8 to i64), i64 ptrtoint (ptr @table.multiple.load.uses.rel to i64)) to i32), i32 trunc (i64 sub (i64 ptrtoint (ptr @.str.9 to i64), i64 ptrtoint (ptr @table.multiple.load.uses.rel to i64)) to i32)], align 4
+; CHECK: @table.volatile = internal constant [2 x ptr] [ptr @.str.8, ptr @.str.9], align 16
 ;.
 define ptr @external_linkage(i32 %cond) {
 ; CHECK-LABEL: define ptr @external_linkage(
@@ -323,12 +369,104 @@ entry:
   ret ptr %1
 }
 
+define ptr @gep_no_leading_zero(i64 %index) {
+; CHECK-LABEL: define ptr @gep_no_leading_zero(
+; CHECK-SAME: i64 [[INDEX:%.*]]) {
+; CHECK-NEXT:    [[RELTABLE_SHIFT:%.*]] = shl i64 [[INDEX]], 2
+; CHECK-NEXT:    [[LOAD:%.*]] = call ptr @llvm.load.relative.i64(ptr @table3.rel, i64 [[RELTABLE_SHIFT]])
+; CHECK-NEXT:    ret ptr [[LOAD]]
+;
+  %gep = getelementptr ptr, ptr @table3, i64 %index
+  %load = load ptr, ptr %gep
+  ret ptr %load
+}
+
+define ptr @gep_wrong_stride(i64 %index) {
+; CHECK-LABEL: define ptr @gep_wrong_stride(
+; CHECK-SAME: i64 [[INDEX:%.*]]) {
+; CHECK-NEXT:    [[GEP:%.*]] = getelementptr i8, ptr @table4, i64 [[INDEX]]
+; CHECK-NEXT:    [[LOAD:%.*]] = load ptr, ptr [[GEP]], align 8
+; CHECK-NEXT:    ret ptr [[LOAD]]
+;
+  %gep = getelementptr i8, ptr @table4, i64 %index
+  %load = load ptr, ptr %gep
+  ret ptr %load
+}
+
+define ptr @gep_wrong_constant_offset(i64 %index) {
+; CHECK-LABEL: define ptr @gep_wrong_constant_offset(
+; CHECK-SAME: i64 [[INDEX:%.*]]) {
+; CHECK-NEXT:    [[GEP:%.*]] = getelementptr { ptr, i32 }, ptr @table5, i64 [[INDEX]], i32 1
+; CHECK-NEXT:    [[LOAD:%.*]] = load ptr, ptr [[GEP]], align 8
+; CHECK-NEXT:    ret ptr [[LOAD]]
+;
+  %gep = getelementptr { ptr, i32 }, ptr @table5, i64 %index, i32 1
+  %load = load ptr, ptr %gep
+  ret ptr %load
+}
+
+; This is intentionally advancing by two pointers.
+define ptr @table_with_skipped_elements(i64 %index) {
+; CHECK-LABEL: define ptr @table_with_skipped_elements(
+; CHECK-SAME: i64 [[INDEX:%.*]]) {
+; CHECK-NEXT:    [[RELTABLE_SHIFT:%.*]] = shl i64 [[INDEX]], 2
+; CHECK-NEXT:    [[LOAD:%.*]] = call ptr @llvm.load.relative.i64(ptr @skip.table.rel, i64 [[RELTABLE_SHIFT]])
+; CHECK-NEXT:    ret ptr [[LOAD]]
+;
+  %gep = getelementptr [2 x ptr], ptr @skip.table, i64 %index
+  %load = load ptr, ptr %gep
+  ret ptr %load
+}
+
+; Same as previous test, but the elements are at the wrong position in the
+; table.
+define ptr @table_with_skipped_elements_wrong(i64 %index) {
+; CHECK-LABEL: define ptr @table_with_skipped_elements_wrong(
+; CHECK-SAME: i64 [[INDEX:%.*]]) {
+; CHECK-NEXT:    [[GEP:%.*]] = getelementptr [2 x ptr], ptr @wrong.skip.table, i64 [[INDEX]]
+; CHECK-NEXT:    [[LOAD:%.*]] = load ptr, ptr [[GEP]], align 8
+; CHECK-NEXT:    ret ptr [[LOAD]]
+;
+  %gep = getelementptr [2 x ptr], ptr @wrong.skip.table, i64 %index
+  %load = load ptr, ptr %gep
+  ret ptr %load
+}
+
+declare void @use(ptr)
+
+define ptr @load_multiple_uses(i64 %index) {
+; CHECK-LABEL: define ptr @load_multiple_uses(
+; CHECK-SAME: i64 [[INDEX:%.*]]) {
+; CHECK-NEXT:    [[RELTABLE_SHIFT:%.*]] = shl i64 [[INDEX]], 2
+; CHECK-NEXT:    [[RELTABLE_INTRINSIC:%.*]] = call ptr @llvm.load.relative.i64(ptr @table.multiple.load.uses.rel, i64 [[RELTABLE_SHIFT]])
+; CHECK-NEXT:    call void @use(ptr [[RELTABLE_INTRINSIC]])
+; CHECK-NEXT:    ret ptr [[RELTABLE_INTRINSIC]]
+;
+  %gep = getelementptr inbounds [2 x ptr], ptr @table.multiple.load.uses, i64 0, i64 %index
+  %load = load ptr, ptr %gep, align 8
+  call void @use(ptr %load)
+  ret ptr %load
+}
+
+define ptr @gep_volatile_load(i64 %index) {
+; CHECK-LABEL: define ptr @gep_volatile_load(
+; CHECK-SAME: i64 [[INDEX:%.*]]) {
+; CHECK-NEXT:    [[GEP:%.*]] = getelementptr inbounds [2 x ptr], ptr @table.volatile, i64 0, i64 [[INDEX]]
+; CHECK-NEXT:    [[LOAD:%.*]] = load volatile ptr, ptr [[GEP]], align 8
+; CHECK-NEXT:    ret ptr [[LOAD]]
+;
+  %gep = getelementptr inbounds [2 x ptr], ptr @table.volatile, i64 0, i64 %index
+  %load = load volatile ptr, ptr %gep, align 8
+  ret ptr %load
+}
+
 !llvm.module.flags = !{!0, !1}
 !0 = !{i32 7, !"PIC Level", i32 2}
 !1 = !{i32 1, !"Code Model", i32 1}
-!4 = !{!"any pointer", !5, i64 0}
+!4 = !{!7, !7, i64 0, i64 0}
 !5 = !{!"omnipotent char", !6, i64 0}
 !6 = !{!"Simple C/C++ TBAA"}
+!7 = !{!"any pointer", !5}
 ;.
 ; CHECK: attributes #[[ATTR0:[0-9]+]] = { nocallback nofree nosync nounwind willreturn memory(argmem: read) }
 ;.

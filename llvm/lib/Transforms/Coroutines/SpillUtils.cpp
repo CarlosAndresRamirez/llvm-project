@@ -16,11 +16,8 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
-namespace llvm {
-
-namespace coro {
-
-namespace {
+using namespace llvm;
+using namespace llvm::coro;
 
 typedef SmallPtrSet<BasicBlock *, 8> VisitedBlocksSet;
 
@@ -71,7 +68,7 @@ static bool isLocalAlloca(CoroAllocaAllocInst *AI) {
 /// This happens during the all-instructions iteration, so it must not
 /// delete the call.
 static Instruction *
-lowerNonLocalAlloca(CoroAllocaAllocInst *AI, const coro::Shape &Shape,
+lowerNonLocalAlloca(CoroAllocaAllocInst *AI, const Shape &Shape,
                     SmallVectorImpl<Instruction *> &DeadInsts) {
   IRBuilder<> Builder(AI);
   auto Alloc = Shape.emitAlloc(Builder, AI->getSize(), nullptr);
@@ -183,6 +180,23 @@ struct AllocaUseVisitor : PtrUseVisitor<AllocaUseVisitor> {
     handleAlias(I);
   }
 
+  void visitCatchPadInst(CatchPadInst &I) {
+    // Windows EH requires exception objects allocated on the stack,
+    // shortcut the traversal and keep it on stack.
+    ShouldLiveOnFrame = false;
+    Base::Worklist.clear();
+  }
+
+  void visitInsertElementInst(InsertElementInst &I) {
+    enqueueUsers(I);
+    handleAlias(I);
+  }
+
+  void visitInsertValueInst(InsertValueInst &I) {
+    enqueueUsers(I);
+    handleAlias(I);
+  }
+
   void visitStoreInst(StoreInst &SI) {
     // Regardless whether the alias of the alloca is the value operand or the
     // pointer operand, we need to assume the alloca is been written.
@@ -257,6 +271,17 @@ struct AllocaUseVisitor : PtrUseVisitor<AllocaUseVisitor> {
     handleAlias(ASC);
   }
 
+  // An integer address taken before CoroBegin must be recomputed from the
+  // frame just like a pointer alias, or it keeps the stack address.
+  void visitPtrToIntInst(PtrToIntInst &I) {
+    Base::visitPtrToIntInst(I);
+    handleAlias(I);
+  }
+
+  // Unlike ptrtoint, ptrtoaddr does not capture provenance, so the alloca
+  // cannot be written through it and it is not an escape.
+  void visitPtrToAddrInst(PtrToAddrInst &I) { handleAlias(I); }
+
   void visitGetElementPtrInst(GetElementPtrInst &GEPI) {
     // The base visitor will adjust Offset accordingly.
     Base::visitGetElementPtrInst(GEPI);
@@ -292,7 +317,8 @@ struct AllocaUseVisitor : PtrUseVisitor<AllocaUseVisitor> {
 
   bool getMayWriteBeforeCoroBegin() const { return MayWriteBeforeCoroBegin; }
 
-  DenseMap<Instruction *, std::optional<APInt>> getAliasesCopy() const {
+  SmallMapVector<Instruction *, std::optional<APInt>, 4>
+  getAliasesCopy() const {
     assert(getShouldLiveOnFrame() && "This method should only be called if the "
                                      "alloca needs to live on the frame.");
     for (const auto &P : AliasOffetMap)
@@ -309,7 +335,7 @@ private:
   // All alias to the original AllocaInst, created before CoroBegin and used
   // after CoroBegin. Each entry contains the instruction and the offset in the
   // original Alloca. They need to be recreated after CoroBegin off the frame.
-  DenseMap<Instruction *, std::optional<APInt>> AliasOffetMap{};
+  SmallMapVector<Instruction *, std::optional<APInt>, 4> AliasOffetMap{};
   SmallPtrSet<Instruction *, 4> Users{};
   SmallPtrSet<IntrinsicInst *, 2> LifetimeStarts{};
   SmallVector<BasicBlock *> LifetimeStartBBs{};
@@ -440,10 +466,8 @@ static void collectFrameAlloca(AllocaInst *AI, const coro::Shape &Shape,
                        Visitor.getMayWriteBeforeCoroBegin());
 }
 
-} // namespace
-
-void collectSpillsFromArgs(SpillInfo &Spills, Function &F,
-                           const SuspendCrossingInfo &Checker) {
+void coro::collectSpillsFromArgs(SpillInfo &Spills, Function &F,
+                                 const SuspendCrossingInfo &Checker) {
   // Collect the spills for arguments and other not-materializable values.
   for (Argument &A : F.args())
     for (User *U : A.users())
@@ -451,7 +475,7 @@ void collectSpillsFromArgs(SpillInfo &Spills, Function &F,
         Spills[&A].push_back(cast<Instruction>(U));
 }
 
-void collectSpillsAndAllocasFromInsts(
+void coro::collectSpillsAndAllocasFromInsts(
     SpillInfo &Spills, SmallVector<AllocaInfo, 8> &Allocas,
     SmallVector<Instruction *, 4> &DeadInstructions,
     SmallVector<CoroAllocaAllocInst *, 4> &LocalAllocas, Function &F,
@@ -506,8 +530,8 @@ void collectSpillsAndAllocasFromInsts(
   }
 }
 
-void collectSpillsFromDbgInfo(SpillInfo &Spills, Function &F,
-                              const SuspendCrossingInfo &Checker) {
+void coro::collectSpillsFromDbgInfo(SpillInfo &Spills, Function &F,
+                                    const SuspendCrossingInfo &Checker) {
   // We don't want the layout of coroutine frame to be affected
   // by debug information. So we only choose to salvage dbg.values for
   // whose value is already in the frame.
@@ -525,10 +549,9 @@ void collectSpillsFromDbgInfo(SpillInfo &Spills, Function &F,
 
 /// Async and Retcon{Once} conventions assume that all spill uses can be sunk
 /// after the coro.begin intrinsic.
-void sinkSpillUsesAfterCoroBegin(const DominatorTree &Dom,
-                                 CoroBeginInst *CoroBegin,
-                                 coro::SpillInfo &Spills,
-                                 SmallVectorImpl<coro::AllocaInfo> &Allocas) {
+void coro::sinkSpillUsesAfterCoroBegin(
+    const DominatorTree &Dom, CoroBeginInst *CoroBegin, coro::SpillInfo &Spills,
+    SmallVectorImpl<coro::AllocaInfo> &Allocas) {
   SmallSetVector<Instruction *, 32> ToMove;
   SmallVector<Instruction *, 32> Worklist;
 
@@ -572,8 +595,9 @@ void sinkSpillUsesAfterCoroBegin(const DominatorTree &Dom,
     Inst->moveBefore(InsertPt->getIterator());
 }
 
-BasicBlock::iterator getSpillInsertionPt(const coro::Shape &Shape, Value *Def,
-                                         const DominatorTree &DT) {
+BasicBlock::iterator coro::getSpillInsertionPt(const coro::Shape &Shape,
+                                               Value *Def,
+                                               const DominatorTree &DT) {
   BasicBlock::iterator InsertPt;
   if (auto *Arg = dyn_cast<Argument>(Def)) {
     // For arguments, we will place the store instruction right after
@@ -615,7 +639,3 @@ BasicBlock::iterator getSpillInsertionPt(const coro::Shape &Shape, Value *Def,
 
   return InsertPt;
 }
-
-} // End namespace coro.
-
-} // End namespace llvm.

@@ -15,9 +15,9 @@
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
-#include "llvm/PassRegistry.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Compiler.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/GenericDomTreeConstruction.h"
 
 using namespace llvm;
@@ -89,20 +89,33 @@ MachineDominatorTreePrinterPass::run(MachineFunction &MF,
   return PreservedAnalyses::all();
 }
 
+PreservedAnalyses
+MachineDominatorTreeVerifierPass::run(MachineFunction &MF,
+                                      MachineFunctionAnalysisManager &MFAM) {
+  auto &DT = MFAM.getResult<MachineDominatorTreeAnalysis>(MF);
+  if (!DT.verify())
+    reportFatalInternalError(
+        "verify<machine-dom-tree> detected an invalid dominator tree");
+  return PreservedAnalyses::all();
+}
+
 char MachineDominatorTreeWrapperPass::ID = 0;
 
 INITIALIZE_PASS(MachineDominatorTreeWrapperPass, "machinedomtree",
                 "MachineDominator Tree Construction", true, true)
 
 MachineDominatorTreeWrapperPass::MachineDominatorTreeWrapperPass()
-    : MachineFunctionPass(ID) {
-  initializeMachineDominatorTreeWrapperPassPass(
-      *PassRegistry::getPassRegistry());
-}
+    : MachineFunctionPass(ID) {}
 
 char &llvm::MachineDominatorsID = MachineDominatorTreeWrapperPass::ID;
 
 bool MachineDominatorTreeWrapperPass::runOnMachineFunction(MachineFunction &F) {
+  if (F.empty()) {
+    assert(F.getProperties().hasFailedISel() &&
+           "Machine function should not be empty unless ISel failed.");
+    return false;
+  }
+
   DT = MachineDominatorTree(F);
   return false;
 }

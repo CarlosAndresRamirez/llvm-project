@@ -8,6 +8,7 @@
 
 #include "mlir/Conversion/IndexToLLVM/IndexToLLVM.h"
 
+#include "mlir/Analysis/DataLayoutAnalysis.h"
 #include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Dialect/Index/IR/IndexAttrs.h"
@@ -354,10 +355,12 @@ void ConvertIndexToLLVMPass::runOnOperation() {
   target.addLegalDialect<LLVM::LLVMDialect>();
 
   // Set LLVM lowering options.
-  LowerToLLVMOptions options(&getContext());
+  const auto &dataLayoutAnalysis = getAnalysis<DataLayoutAnalysis>();
+  LowerToLLVMOptions options(&getContext(),
+                             dataLayoutAnalysis.getAtOrAbove(getOperation()));
   if (indexBitwidth != kDeriveIndexBitwidthFromDataLayout)
     options.overrideIndexBitwidth(indexBitwidth);
-  LLVMTypeConverter typeConverter(&getContext(), options);
+  LLVMTypeConverter typeConverter(&getContext(), options, &dataLayoutAnalysis);
 
   // Populate patterns and run the conversion.
   RewritePatternSet patterns(&getContext());
@@ -375,7 +378,9 @@ void ConvertIndexToLLVMPass::runOnOperation() {
 namespace {
 /// Implement the interface to convert Index to LLVM.
 struct IndexToLLVMDialectInterface : public ConvertToLLVMPatternInterface {
-  using ConvertToLLVMPatternInterface::ConvertToLLVMPatternInterface;
+  IndexToLLVMDialectInterface(Dialect *dialect)
+      : ConvertToLLVMPatternInterface(dialect) {}
+
   void loadDependentDialects(MLIRContext *context) const final {
     context->loadDialect<LLVM::LLVMDialect>();
   }

@@ -138,7 +138,7 @@ static RT_API_ATTRS common::optional<SubscriptValue> GetSubscriptValue(
   bool overflow{false};
   while (ch && *ch >= '0' && *ch <= '9') {
     SubscriptValue was{value.value_or(0)};
-    overflow |= was >= std::numeric_limits<SubscriptValue>::max() / 10;
+    overflow |= was >= common::numeric_limits<SubscriptValue>::max() / 10;
     value = 10 * was + *ch - '0';
     io.HandleRelativePosition(byteCount);
     ch = io.GetCurrentChar(byteCount);
@@ -170,7 +170,9 @@ static RT_API_ATTRS bool HandleSubscripts(IoStatementState &io,
   std::size_t byteCount{0};
   common::optional<char32_t> ch{io.GetNextNonBlank(byteCount)};
   char32_t comma{GetComma(io)};
-  for (; ch && *ch != ')'; ++j) {
+
+  // Read subscripts, but don't exceed rank to prevent buffer overrun.
+  for (int rank{source.rank()}; ch && *ch != ')' && j <= rank; ++j) {
     SubscriptValue dimLower{0}, dimUpper{0}, dimStride{0};
     if (j < maxRank && j < source.rank()) {
       const Dimension &dim{source.GetDimension(j)};
@@ -258,13 +260,40 @@ static RT_API_ATTRS bool HandleSubscripts(IoStatementState &io,
   return false;
 }
 
-static RT_API_ATTRS void StorageSequenceExtension(
-    Descriptor &desc, const Descriptor &source) {
+static RT_API_ATTRS bool HasDefinedIoSubroutine(common::DefinedIo definedIo,
+    typeInfo::SpecialBinding::Which specialBinding,
+    const typeInfo::DerivedType *derivedType,
+    const NonTbpDefinedIoTable *table) {
+  for (; derivedType; derivedType = derivedType->GetParentType()) {
+    if ((table && table->Find(*derivedType, definedIo) != nullptr) ||
+        derivedType->FindSpecialBinding(specialBinding)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static RT_API_ATTRS bool HasDefinedIoSubroutine(common::DefinedIo definedIo,
+    typeInfo::SpecialBinding::Which specialBinding,
+    const Descriptor &descriptor, const NonTbpDefinedIoTable *table) {
+  const DescriptorAddendum *addendum{descriptor.Addendum()};
+  return addendum &&
+      HasDefinedIoSubroutine(
+          definedIo, specialBinding, addendum->derivedType(), table);
+}
+
+static RT_API_ATTRS void StorageSequenceExtension(Descriptor &desc,
+    const Descriptor &source, const io::NonTbpDefinedIoTable *table) {
   // Support the near-universal extension of NAMELIST input into a
   // designatable storage sequence identified by its initial scalar array
   // element.  For example, treat "A(1) = 1. 2. 3." as if it had been
   // "A(1:) = 1. 2. 3.".
-  if (desc.rank() == 0 && (source.rank() == 1 || source.IsContiguous())) {
+  // (But don't do this for derived types with defined formatted READs,
+  // since they might do non-list-directed input that won't stop at the
+  // next namelist input item name.)
+  if (desc.rank() == 0 && (source.rank() == 1 || source.IsContiguous()) &&
+      !HasDefinedIoSubroutine(common::DefinedIo::ReadFormatted,
+          typeInfo::SpecialBinding::Which::ReadFormatted, desc, table)) {
     if (auto stride{source.rank() == 1
                 ? source.GetDimension(0).ByteStride()
                 : static_cast<SubscriptValue>(source.ElementBytes())};
@@ -561,7 +590,8 @@ bool IODEF(InputNamelist)(Cookie cookie, const NamelistGroup &group) {
         next = io.GetCurrentChar(byteCount);
       } while (next && (*next == '(' || *next == '%'));
       if (lastSubscriptDescriptor) {
-        StorageSequenceExtension(*lastSubscriptDescriptor, *lastSubscriptBase);
+        StorageSequenceExtension(*lastSubscriptDescriptor, *lastSubscriptBase,
+            group.nonTbpDefinedIo);
       }
     }
     // Skip the '='
@@ -582,8 +612,19 @@ bool IODEF(InputNamelist)(Cookie cookie, const NamelistGroup &group) {
         return false;
       }
     } else {
-      listInput->ResetForNextNamelistItem(
-          useDescriptor->rank() > 0 ? &group : nullptr);
+      // Pass &group unconditionally (not just for arrays) so the
+      // IsNamelistNameOrSlash look-ahead in Edit{Integer,Real,Logical,
+      // Character}Input fires for scalar items too.  Each of those
+      // per-type value readers starts its list-directed arm with
+      //
+      //     if (IsNamelistNameOrSlash(io)) return false;   // no value
+      //
+      // With &group set, the empty-value probe works for scalars as
+      // well as sequences.  This implements Flang's NAMELIST extension
+      // that accepts an empty scalar assignment (e.g. `l=` immediately
+      // followed by the next name-value pair or the group terminator)
+      // as "keep current value" — see flang/docs/Extensions.md.
+      listInput->ResetForNextNamelistItem(&group);
       if (!descr::DescriptorIO<Direction::Input>(io, *useDescriptor) &&
           handler.InError()) {
         return false;
@@ -596,6 +637,12 @@ bool IODEF(InputNamelist)(Cookie cookie, const NamelistGroup &group) {
   }
   if (next && *next == '/') {
     io.HandleRelativePosition(byteCount);
+    if (auto *listInput{
+            io.get_if<ListDirectedStatementState<Direction::Input>>()}) {
+      // Don't let the namelist's terminal '/' mess up a parent I/O's
+      // list-directed input.
+      listInput->set_hitSlash(false);
+    }
   } else if (*next && (*next == '&' || *next == '$')) {
     // stop at beginning of next group
   } else {

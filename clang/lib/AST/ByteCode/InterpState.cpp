@@ -7,9 +7,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "InterpState.h"
+#include "EvalSettings.h"
 #include "InterpFrame.h"
 #include "InterpStack.h"
 #include "Program.h"
+#include "Reflect.h"
 #include "State.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclTemplate.h"
@@ -17,31 +19,57 @@
 using namespace clang;
 using namespace clang::interp;
 
-InterpState::InterpState(State &Parent, Program &P, InterpStack &Stk,
+InterpState::InterpState(const EvalSettings &Settings, Program &P,
+                         InterpStack &Stk, FrameAllocator &FrameAlloc,
                          Context &Ctx, SourceMapper *M)
-    : Parent(Parent), M(M), P(P), Stk(Stk), Ctx(Ctx), BottomFrame(*this),
-      Current(&BottomFrame) {}
+    : State(Ctx.getASTContext(), Settings.SProxy, Settings.EvalStatus), M(M),
+      FrameAlloc(FrameAlloc), P(P), Stk(Stk), Ctx(Ctx), BottomFrame(*this),
+      Current(&BottomFrame), StepsLeft(Ctx.getLangOpts().ConstexprStepLimit),
+      InfiniteSteps(StepsLeft == 0), EvalID(Ctx.getEvalID()) {
+  InConstantContext = Settings.InConstantContext;
+  CheckingPotentialConstantExpression =
+      Settings.CheckingPotentialConstantExpression;
+  CheckingForUndefinedBehavior = Settings.CheckingForUndefinedBehavior;
+  EvalMode = Settings.EvalMode;
+}
 
-InterpState::InterpState(State &Parent, Program &P, InterpStack &Stk,
+InterpState::InterpState(const EvalSettings &Settings, Program &P,
+                         InterpStack &Stk, FrameAllocator &FrameAlloc,
                          Context &Ctx, const Function *Func)
-    : Parent(Parent), M(nullptr), P(P), Stk(Stk), Ctx(Ctx),
-      BottomFrame(*this, Func, nullptr, CodePtr(), Func->getArgSize()),
-      Current(&BottomFrame) {}
+    : State(Ctx.getASTContext(), Settings.SProxy, Settings.EvalStatus),
+      M(nullptr), FrameAlloc(FrameAlloc), P(P), Stk(Stk), Ctx(Ctx),
+      BottomFrame(*this), Current(&BottomFrame),
+      StepsLeft(Ctx.getLangOpts().ConstexprStepLimit),
+      InfiniteSteps(StepsLeft == 0), EvalID(Ctx.getEvalID()) {
+  InConstantContext = Settings.InConstantContext;
+  CheckingPotentialConstantExpression =
+      Settings.CheckingPotentialConstantExpression;
+  CheckingForUndefinedBehavior = Settings.CheckingForUndefinedBehavior;
+  EvalMode = Settings.EvalMode;
+}
+
+InterpState::InterpState(Expr::EvalStatus &Status, Program &P, InterpStack &Stk,
+                         FrameAllocator &FrameAlloc, Context &Ctx,
+                         SourceMapper *M)
+    : State(Ctx.getASTContext(), /*SProxy=*/nullptr, Status), M(M),
+      FrameAlloc(FrameAlloc), P(P), Stk(Stk), Ctx(Ctx), BottomFrame(*this),
+      Current(&BottomFrame), StepsLeft(Ctx.getLangOpts().ConstexprStepLimit),
+      InfiniteSteps(StepsLeft == 0), EvalID(Ctx.getEvalID()) {
+  InConstantContext = true;
+  CheckingPotentialConstantExpression = false;
+  CheckingForUndefinedBehavior = true;
+  EvalMode = EvaluationMode::ConstantExpression;
+}
 
 bool InterpState::inConstantContext() const {
   if (ConstantContextOverride)
     return *ConstantContextOverride;
 
-  return Parent.InConstantContext;
+  return InConstantContext;
 }
 
 InterpState::~InterpState() {
-  while (Current && !Current->isBottomFrame()) {
-    InterpFrame *Next = Current->Caller;
-    delete Current;
-    Current = Next;
-  }
-  BottomFrame.destroyScopes();
+  assert(Current->isBottomFrame());
 
   while (DeadBlocks) {
     DeadBlock *Next = DeadBlocks->Next;
@@ -59,50 +87,39 @@ InterpState::~InterpState() {
 void InterpState::cleanup() {
   // As a last resort, make sure all pointers still pointing to a dead block
   // don't point to it anymore.
-  Alloc.cleanup();
+  if (Alloc)
+    Alloc->cleanup();
 }
 
-Frame *InterpState::getCurrentFrame() { return Current; }
+const Frame *InterpState::getCurrentFrame() { return Current; }
 
-bool InterpState::reportOverflow(const Expr *E, const llvm::APSInt &Value) {
-  QualType Type = E->getType();
-  CCEDiag(E, diag::note_constexpr_overflow) << Value << Type;
-  return noteUndefinedBehavior();
-}
-
-void InterpState::deallocate(Block *B) {
+void InterpState::deallocateWithPointers(Block *B) {
   assert(B);
+  assert(B->hasPointers());
   assert(!B->isDynamic());
-  assert(!B->isStatic());
+  assert(!B->isGlobal());
   assert(!B->isDead());
-
-  // The block might have a pointer saved in a field in its data
-  // that points to the block itself. We call the dtor first,
-  // which will destroy all the data but leave InlineDescriptors
-  // intact. If the block THEN still has pointers, we create a
-  // DeadBlock for it.
-  if (B->IsInitialized)
-    B->invokeDtor();
-
   assert(!B->isInitialized());
-  if (B->hasPointers()) {
-    size_t Size = B->getSize();
-    // Allocate a new block, transferring over pointers.
-    char *Memory =
-        reinterpret_cast<char *>(std::malloc(sizeof(DeadBlock) + Size));
-    auto *D = new (Memory) DeadBlock(DeadBlocks, B);
-    // Since the block doesn't hold any actual data anymore, we can just
-    // memcpy() everything over.
-    std::memcpy(D->rawData(), B->rawData(), Size);
-    D->B.IsInitialized = false;
-  }
+
+  size_t Size = B->getAllocSize();
+  // Allocate a new block, transferring over pointers.
+  char *Memory =
+      reinterpret_cast<char *>(std::malloc(sizeof(DeadBlock) + Size));
+  auto *D = new (Memory) DeadBlock(DeadBlocks, B);
+  // Since the block doesn't hold any actual data anymore, we can just
+  // memcpy() everything over.
+  std::memcpy(D->rawData(), B->rawData(), Size);
+  D->B.IsInitialized = false;
 }
 
 bool InterpState::maybeDiagnoseDanglingAllocations() {
-  bool NoAllocationsLeft = !Alloc.hasAllocations();
+  if (!Alloc)
+    return true;
+
+  bool NoAllocationsLeft = !Alloc->hasAllocations();
 
   if (!checkingPotentialConstantExpression()) {
-    for (const auto &[Source, Site] : Alloc.allocation_sites()) {
+    for (const auto &[Source, Site] : Alloc->allocation_sites()) {
       assert(!Site.empty());
 
       CCEDiag(Source->getExprLoc(), diag::note_constexpr_memory_leak)
@@ -136,10 +153,17 @@ StdAllocatorCaller InterpState::getStdAllocatorCaller(StringRef Name) const {
     if (CTSD->isInStdNamespace() && ClassII && ClassII->isStr("allocator") &&
         TAL.size() >= 1 && TAL[0].getKind() == TemplateArgument::Type) {
       QualType ElemType = TAL[0].getAsType();
-      const auto *NewCall = cast<CallExpr>(F->Caller->getExpr(F->getRetPC()));
+      const auto *NewCall = cast<CallExpr>(F->Caller->getExpr(F->getRetOpPC()));
       return {NewCall, ElemType};
     }
   }
 
   return {};
+}
+
+bool InterpState::diagnoseStepLimitExceeded(CodePtr OpPC) {
+  FFDiag(Current->getSource(OpPC), diag::note_constexpr_step_limit_exceeded, 1)
+      << getLangOpts().ConstexprStepLimit;
+  Note(Current->getSource(OpPC), diag::note_constexpr_steps);
+  return false;
 }

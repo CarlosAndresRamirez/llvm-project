@@ -1,4 +1,4 @@
-// RUN: %check_clang_tidy -std=c99,c11,c17 -check-suffixes=,BEFORE-C23 %s bugprone-easily-swappable-parameters %t \
+// RUN: %check_clang_tidy -std=c17-or-earlier -check-suffixes=,BEFORE-C23 %s bugprone-easily-swappable-parameters %t \
 // RUN:   -config='{CheckOptions: { \
 // RUN:     bugprone-easily-swappable-parameters.MinimumLength: 2, \
 // RUN:     bugprone-easily-swappable-parameters.IgnoredParameterNames: "", \
@@ -6,7 +6,7 @@
 // RUN:     bugprone-easily-swappable-parameters.QualifiersMix: 0, \
 // RUN:     bugprone-easily-swappable-parameters.ModelImplicitConversions: 0, \
 // RUN:     bugprone-easily-swappable-parameters.SuppressParametersUsedTogether: 1, \
-// RUN:     bugprone-easily-swappable-parameters.NamePrefixSuffixSilenceDissimilarityTreshold: 0 \
+// RUN:     bugprone-easily-swappable-parameters.NamePrefixSuffixSilenceDissimilarityThreshold: 0 \
 // RUN:  }}' -- -Wno-strict-prototypes -x c
 //
 // RUN: %check_clang_tidy -std=c23-or-later %s bugprone-easily-swappable-parameters %t \
@@ -17,7 +17,7 @@
 // RUN:     bugprone-easily-swappable-parameters.QualifiersMix: 0, \
 // RUN:     bugprone-easily-swappable-parameters.ModelImplicitConversions: 0, \
 // RUN:     bugprone-easily-swappable-parameters.SuppressParametersUsedTogether: 1, \
-// RUN:     bugprone-easily-swappable-parameters.NamePrefixSuffixSilenceDissimilarityTreshold: 0 \
+// RUN:     bugprone-easily-swappable-parameters.NamePrefixSuffixSilenceDissimilarityThreshold: 0 \
 // RUN:  }}' -- -Wno-strict-prototypes -x c
 
 int add(int X, int Y);

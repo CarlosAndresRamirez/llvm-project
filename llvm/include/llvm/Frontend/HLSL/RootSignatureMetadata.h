@@ -17,6 +17,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Frontend/HLSL/HLSLRootSignature.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/Module.h"
 #include "llvm/MC/DXContainerRootSignature.h"
 #include "llvm/Support/Compiler.h"
 
@@ -27,75 +28,15 @@ class Metadata;
 
 namespace hlsl {
 namespace rootsig {
-
-template <typename T>
 class RootSignatureValidationError
-    : public ErrorInfo<RootSignatureValidationError<T>> {
-public:
-  static char ID;
-  StringRef ParamName;
-  T Value;
-
-  RootSignatureValidationError(StringRef ParamName, T Value)
-      : ParamName(ParamName), Value(Value) {}
-
-  void log(raw_ostream &OS) const override {
-    OS << "Invalid value for " << ParamName << ": " << Value;
-  }
-
-  std::error_code convertToErrorCode() const override {
-    return llvm::inconvertibleErrorCode();
-  }
-};
-
-class GenericRSMetadataError : public ErrorInfo<GenericRSMetadataError> {
+    : public ErrorInfo<RootSignatureValidationError> {
 public:
   LLVM_ABI static char ID;
-  StringRef Message;
-  MDNode *MD;
+  std::string Msg;
 
-  GenericRSMetadataError(StringRef Message, MDNode *MD)
-      : Message(Message), MD(MD) {}
+  RootSignatureValidationError(const Twine &Msg) : Msg(Msg.str()) {}
 
-  void log(raw_ostream &OS) const override {
-    OS << Message;
-    if (MD) {
-      OS << "\n";
-      MD->printTree(OS);
-    }
-  }
-
-  std::error_code convertToErrorCode() const override {
-    return llvm::inconvertibleErrorCode();
-  }
-};
-
-class InvalidRSMetadataFormat : public ErrorInfo<InvalidRSMetadataFormat> {
-public:
-  LLVM_ABI static char ID;
-  StringRef ElementName;
-
-  InvalidRSMetadataFormat(StringRef ElementName) : ElementName(ElementName) {}
-
-  void log(raw_ostream &OS) const override {
-    OS << "Invalid format for  " << ElementName;
-  }
-
-  std::error_code convertToErrorCode() const override {
-    return llvm::inconvertibleErrorCode();
-  }
-};
-
-class InvalidRSMetadataValue : public ErrorInfo<InvalidRSMetadataValue> {
-public:
-  LLVM_ABI static char ID;
-  StringRef ParamName;
-
-  InvalidRSMetadataValue(StringRef ParamName) : ParamName(ParamName) {}
-
-  void log(raw_ostream &OS) const override {
-    OS << "Invalid value for " << ParamName;
-  }
+  void log(raw_ostream &OS) const override { OS << Msg; }
 
   std::error_code convertToErrorCode() const override {
     return llvm::inconvertibleErrorCode();
@@ -104,8 +45,8 @@ public:
 
 class MetadataBuilder {
 public:
-  MetadataBuilder(llvm::LLVMContext &Ctx, ArrayRef<RootElement> Elements)
-      : Ctx(Ctx), Elements(Elements) {}
+  MetadataBuilder(llvm::Module &M, ArrayRef<RootElement> Elements)
+      : M(M), Ctx(M.getContext()), Elements(Elements) {}
 
   /// Iterates through elements and dispatches onto the correct Build* method
   ///
@@ -122,6 +63,7 @@ private:
   MDNode *BuildDescriptorTableClause(const DescriptorTableClause &Clause);
   MDNode *BuildStaticSampler(const StaticSampler &Sampler);
 
+  llvm::Module &M;
   llvm::LLVMContext &Ctx;
   ArrayRef<RootElement> Elements;
   SmallVector<Metadata *> GeneratedMetadata;

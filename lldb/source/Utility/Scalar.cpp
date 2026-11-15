@@ -18,6 +18,7 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
 
+#include <algorithm>
 #include <cinttypes>
 #include <cstdio>
 
@@ -471,23 +472,11 @@ bool Scalar::ShiftRightLogical(const Scalar &rhs) {
 }
 
 Scalar &Scalar::operator>>=(const Scalar &rhs) {
-  switch (m_type) {
-  case e_void:
-  case e_float:
+  if (m_type == e_int && rhs.m_type == e_int) {
+    // Avoid APSInt assertion when exceeding the width is a sign or zero fill.
+    m_integer >>= rhs.m_integer.getLimitedValue(m_integer.getBitWidth());
+  } else {
     m_type = e_void;
-    break;
-
-  case e_int:
-    switch (rhs.m_type) {
-    case e_void:
-    case e_float:
-      m_type = e_void;
-      break;
-    case e_int:
-      m_integer = m_integer.ashr(rhs.m_integer);
-      break;
-    }
-    break;
   }
   return *this;
 }
@@ -565,12 +554,13 @@ const Scalar lldb_private::operator-(Scalar lhs, Scalar rhs) {
 
 const Scalar lldb_private::operator/(Scalar lhs, Scalar rhs) {
   Scalar result;
-  if ((result.m_type = Scalar::PromoteToMaxType(lhs, rhs)) != Scalar::e_void &&
-      !rhs.IsZero()) {
+  if ((result.m_type = Scalar::PromoteToMaxType(lhs, rhs)) != Scalar::e_void) {
     switch (result.m_type) {
     case Scalar::e_void:
       break;
     case Scalar::e_int:
+      if (rhs.IsZero())
+        break;
       result.m_integer = lhs.m_integer / rhs.m_integer;
       return result;
     case Scalar::e_float:
@@ -833,7 +823,8 @@ bool Scalar::ExtractBitfield(uint32_t bit_size, uint32_t bit_offset) {
     break;
 
   case Scalar::e_int:
-    m_integer >>= bit_offset;
+    // Avoid APSInt assertion when exceeding the width.
+    m_integer >>= std::min(bit_offset, m_integer.getBitWidth());
     m_integer = m_integer.extOrTrunc(bit_size).extOrTrunc(8 * GetByteSize());
     return true;
   }

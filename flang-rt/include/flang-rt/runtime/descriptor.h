@@ -171,20 +171,21 @@ public:
       void *p = nullptr, int rank = maxRank,
       const SubscriptValue *extent = nullptr,
       ISO::CFI_attribute_t attribute = CFI_attribute_other,
-      bool addendum = false);
+      bool addendum = false, int allocatorIdx = kDefaultAllocator);
   RT_API_ATTRS void Establish(TypeCategory, int kind, void *p = nullptr,
       int rank = maxRank, const SubscriptValue *extent = nullptr,
       ISO::CFI_attribute_t attribute = CFI_attribute_other,
-      bool addendum = false);
+      bool addendum = false, int allocatorIdx = kDefaultAllocator);
   RT_API_ATTRS void Establish(int characterKind, std::size_t characters,
       void *p = nullptr, int rank = maxRank,
       const SubscriptValue *extent = nullptr,
       ISO::CFI_attribute_t attribute = CFI_attribute_other,
-      bool addendum = false);
+      bool addendum = false, int allocatorIdx = kDefaultAllocator);
   RT_API_ATTRS void Establish(const typeInfo::DerivedType &dt,
       void *p = nullptr, int rank = maxRank,
       const SubscriptValue *extent = nullptr,
-      ISO::CFI_attribute_t attribute = CFI_attribute_other);
+      ISO::CFI_attribute_t attribute = CFI_attribute_other,
+      int allocatorIdx = kDefaultAllocator);
 
   RT_API_ATTRS void UncheckedScalarEstablish(
       const typeInfo::DerivedType &, void *);
@@ -417,12 +418,7 @@ public:
     if (!pointer) {
       return CFI_ERROR_BASE_ADDR_NULL;
     } else {
-      int allocIndex{MapAllocIdx()};
-      if (allocIndex == kDefaultAllocator) {
-        std::free(pointer);
-      } else {
-        allocatorRegistry.GetDeallocator(MapAllocIdx())(pointer);
-      }
+      allocatorRegistry.Deallocate(MapAllocIdx(), pointer);
       descriptor.base_addr = nullptr;
       return CFI_SUCCESS;
     }
@@ -509,7 +505,9 @@ public:
 
   RT_API_ATTRS void Check() const;
 
-  void Dump(FILE * = stdout) const;
+  // When dumpRawType, dumps stringified CFI_type_*, otherwise
+  // try to canonicalize and print as a Fortran type.
+  void Dump(FILE * = stdout, bool dumpRawType = true) const;
 
   RT_API_ATTRS inline bool HasAddendum() const {
     return raw_.extra & _CFI_ADDENDUM_FLAG;

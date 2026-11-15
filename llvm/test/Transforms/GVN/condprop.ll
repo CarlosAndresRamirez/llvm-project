@@ -280,7 +280,7 @@ different:
 define i1 @test6(i32 %x, i32 %y) {
 ; CHECK-LABEL: @test6(
 ; CHECK-NEXT:    [[CMP2:%.*]] = icmp ne i32 [[X:%.*]], [[Y:%.*]]
-; CHECK-NEXT:    [[CMP:%.*]] = icmp eq i32 [[X]], [[Y]]
+; CHECK-NEXT:    [[CMP:%.*]] = xor i1 [[CMP2]], true
 ; CHECK-NEXT:    br i1 [[CMP]], label [[SAME:%.*]], label [[DIFFERENT:%.*]]
 ; CHECK:       same:
 ; CHECK-NEXT:    ret i1 false
@@ -302,7 +302,7 @@ different:
 define i1 @test6_fp(float %x, float %y) {
 ; CHECK-LABEL: @test6_fp(
 ; CHECK-NEXT:    [[CMP2:%.*]] = fcmp une float [[X:%.*]], [[Y:%.*]]
-; CHECK-NEXT:    [[CMP:%.*]] = fcmp oeq float [[X]], [[Y]]
+; CHECK-NEXT:    [[CMP:%.*]] = xor i1 [[CMP2]], true
 ; CHECK-NEXT:    br i1 [[CMP]], label [[SAME:%.*]], label [[DIFFERENT:%.*]]
 ; CHECK:       same:
 ; CHECK-NEXT:    ret i1 false
@@ -319,6 +319,66 @@ same:
 
 different:
   ret i1 %cmp3
+}
+
+define i1 @test6_phi1(i1 %c, i32 %x, i32 %y) {
+; CHECK-LABEL: @test6_phi1(
+; CHECK-NEXT:  entry:
+; CHECK-NEXT:    [[CMP_NOT:%.*]] = icmp ne i32 [[X:%.*]], [[Y:%.*]]
+; CHECK-NEXT:    br i1 [[C:%.*]], label [[BB1:%.*]], label [[BB2:%.*]]
+; CHECK:       bb1:
+; CHECK-NEXT:    [[CMP:%.*]] = xor i1 [[CMP_NOT]], true
+; CHECK-NEXT:    br i1 [[CMP]], label [[BB2]], label [[BB3:%.*]]
+; CHECK:       bb2:
+; CHECK-NEXT:    [[PHI:%.*]] = phi i1 [ false, [[BB1]] ], [ true, [[ENTRY:%.*]] ]
+; CHECK-NEXT:    ret i1 [[PHI]]
+; CHECK:       bb3:
+; CHECK-NEXT:    ret i1 false
+;
+entry:
+  %cmp.not = icmp ne i32 %x, %y
+  br i1 %c, label %bb1, label %bb2
+
+bb1:
+  %cmp = icmp eq i32 %x, %y
+  br i1 %cmp, label %bb2, label %bb3
+
+bb2:
+  %phi = phi i1 [ %cmp.not, %bb1 ], [ true, %entry ]
+  ret i1 %phi
+
+bb3:
+  ret i1 false
+}
+
+define i1 @test6_phi2(i1 %c, i32 %x, i32 %y) {
+; CHECK-LABEL: @test6_phi2(
+; CHECK-NEXT:  entry:
+; CHECK-NEXT:    br i1 [[C:%.*]], label [[BB1:%.*]], label [[BB2:%.*]]
+; CHECK:       bb1:
+; CHECK-NEXT:    [[CMP_NOT:%.*]] = icmp ne i32 [[X:%.*]], [[Y:%.*]]
+; CHECK-NEXT:    [[CMP:%.*]] = xor i1 [[CMP_NOT]], true
+; CHECK-NEXT:    br i1 [[CMP]], label [[BB2]], label [[BB3:%.*]]
+; CHECK:       bb2:
+; CHECK-NEXT:    [[PHI:%.*]] = phi i1 [ false, [[BB1]] ], [ true, [[ENTRY:%.*]] ]
+; CHECK-NEXT:    ret i1 [[PHI]]
+; CHECK:       bb3:
+; CHECK-NEXT:    ret i1 false
+;
+entry:
+  br i1 %c, label %bb1, label %bb2
+
+bb1:
+  %cmp.not = icmp ne i32 %x, %y
+  %cmp = icmp eq i32 %x, %y
+  br i1 %cmp, label %bb2, label %bb3
+
+bb2:
+  %phi = phi i1 [ %cmp.not, %bb1 ], [ true, %entry ]
+  ret i1 %phi
+
+bb3:
+  ret i1 false
 }
 
 define i1 @test7(i32 %x, i32 %y) {
@@ -366,7 +426,7 @@ different:
 define i1 @test8(i32 %x, i32 %y) {
 ; CHECK-LABEL: @test8(
 ; CHECK-NEXT:    [[CMP2:%.*]] = icmp sle i32 [[X:%.*]], [[Y:%.*]]
-; CHECK-NEXT:    [[CMP:%.*]] = icmp sgt i32 [[X]], [[Y]]
+; CHECK-NEXT:    [[CMP:%.*]] = xor i1 [[CMP2]], true
 ; CHECK-NEXT:    br i1 [[CMP]], label [[SAME:%.*]], label [[DIFFERENT:%.*]]
 ; CHECK:       same:
 ; CHECK-NEXT:    ret i1 false
@@ -388,7 +448,7 @@ different:
 define i1 @test8_fp(float %x, float %y) {
 ; CHECK-LABEL: @test8_fp(
 ; CHECK-NEXT:    [[CMP2:%.*]] = fcmp ule float [[X:%.*]], [[Y:%.*]]
-; CHECK-NEXT:    [[CMP:%.*]] = fcmp ogt float [[X]], [[Y]]
+; CHECK-NEXT:    [[CMP:%.*]] = xor i1 [[CMP2]], true
 ; CHECK-NEXT:    br i1 [[CMP]], label [[SAME:%.*]], label [[DIFFERENT:%.*]]
 ; CHECK:       same:
 ; CHECK-NEXT:    ret i1 false
@@ -802,6 +862,17 @@ bb5:
   %phi2 = phi ptr [ poison, %bb5 ], [ %phi1, %bb4 ]
   call void @use_ptr(ptr %phi2)
   br label %bb5
+}
+
+define <2 x ptr> @select_vector_eq(<2 x ptr> %a, <2 x ptr> %b) {
+; CHECK-LABEL: @select_vector_eq(
+; CHECK-NEXT:    [[CMP:%.*]] = icmp eq <2 x ptr> [[A:%.*]], [[B:%.*]]
+; CHECK-NEXT:    [[SEL:%.*]] = select <2 x i1> [[CMP]], <2 x ptr> [[A]], <2 x ptr> [[B]]
+; CHECK-NEXT:    ret <2 x ptr> [[SEL]]
+;
+  %cmp = icmp eq <2 x ptr> %a, %b
+  %sel = select <2 x i1> %cmp, <2 x ptr> %a, <2 x ptr> %b
+  ret <2 x ptr> %sel
 }
 
 define void @select_same_obj(i1 %c, ptr %p, i64 %x) {

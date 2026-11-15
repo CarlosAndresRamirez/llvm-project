@@ -13,7 +13,6 @@
 #include "AArch64InstrInfo.h"
 #include "AArch64MachineFunctionInfo.h"
 #include "AArch64Subtarget.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
@@ -184,6 +183,17 @@ bool SMEPeepholeOpt::optimizeStartStopPairs(
           isSVERegOp(TRI, MRI, MI.getOperand(1)))
         Prev = nullptr;
       break;
+    case AArch64::RestoreZAPseudo:
+    case AArch64::InOutZAUsePseudo:
+    case AArch64::CommitZASavePseudo:
+    case AArch64::SMEStateAllocPseudo:
+    case AArch64::RequiresZASavePseudo:
+      // These instructions only depend on the ZA state, not the streaming mode,
+      // so if the pair of smstart/stop is only changing the streaming mode, we
+      // can permit these instructions.
+      if (Prev->getOperand(0).getImm() != AArch64SVCR::SVCRSM)
+        Prev = nullptr;
+      break;
     case AArch64::ADJCALLSTACKDOWN:
     case AArch64::ADJCALLSTACKUP:
     case AArch64::ANDXri:
@@ -283,7 +293,11 @@ bool SMEPeepholeOpt::runOnMachineFunction(MachineFunction &MF) {
   if (skipFunction(MF.getFunction()))
     return false;
 
-  if (!MF.getSubtarget<AArch64Subtarget>().hasSME())
+  AArch64FunctionInfo *AFI = MF.getInfo<AArch64FunctionInfo>();
+  SMEAttrs SMEFnAttrs = AFI->getSMEFnAttrs();
+
+  if (!MF.getSubtarget<AArch64Subtarget>().hasSME() &&
+      !SMEFnAttrs.hasStreamingCompatibleInterface())
     return false;
 
   assert(MF.getRegInfo().isSSA() && "Expected to be run on SSA form!");
@@ -306,7 +320,6 @@ bool SMEPeepholeOpt::runOnMachineFunction(MachineFunction &MF) {
     }
   }
 
-  AArch64FunctionInfo *AFI = MF.getInfo<AArch64FunctionInfo>();
   if (FunctionHasAllSMChangesRemoved)
     AFI->setHasStreamingModeChanges(false);
 

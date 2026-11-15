@@ -15,15 +15,12 @@
 #include "TestDialect.h"
 #include "TestTypes.h"
 #include "mlir/IR/Attributes.h"
-#include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/ExtensibleDialect.h"
 #include "mlir/IR/OpImplementation.h"
 #include "mlir/IR/Types.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/Hashing.h"
-#include "llvm/ADT/StringExtras.h"
-#include "llvm/ADT/TypeSwitch.h"
 #include "llvm/ADT/bit.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
@@ -224,6 +221,25 @@ LogicalResult TestCopyCountAttr::verify(
 }
 
 //===----------------------------------------------------------------------===//
+// TestSymbolRefAttr
+//===----------------------------------------------------------------------===//
+
+LogicalResult
+TestSymbolRefAttr::verifySymbolUses(Operation *op,
+                                    SymbolTableCollection &symbolTable) const {
+  // Verify that the referenced symbol exists
+  if (!symbolTable.lookupNearestSymbolFrom<SymbolOpInterface>(op, getSymbol()))
+    return op->emitOpError()
+           << "TestSymbolRefAttr::verifySymbolUses: '" << getSymbol()
+           << "' does not reference a valid symbol";
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// Generated Attribute Definitions
+//===----------------------------------------------------------------------===//
+
+//===----------------------------------------------------------------------===//
 // CopyCountAttr Implementation
 //===----------------------------------------------------------------------===//
 
@@ -258,7 +274,7 @@ struct mlir::FieldParser<test::CopyCount> {
   }
 };
 namespace test {
-llvm::hash_code hash_value(const test::CopyCount &copyCount) {
+static llvm::hash_code hash_value(const test::CopyCount &copyCount) {
   return llvm::hash_value(copyCount.value);
 }
 } // namespace test
@@ -385,13 +401,15 @@ TestOpAsmAttrInterfaceAttr::getAlias(::llvm::raw_ostream &os) const {
 //===----------------------------------------------------------------------===//
 
 bool TestConstMemorySpaceAttr::isValidLoad(
-    Type type, mlir::ptr::AtomicOrdering ordering, IntegerAttr alignment,
+    Type type, mlir::ptr::AtomicOrdering ordering,
+    std::optional<int64_t> alignment, const ::mlir::DataLayout *dataLayout,
     function_ref<InFlightDiagnostic()> emitError) const {
   return true;
 }
 
 bool TestConstMemorySpaceAttr::isValidStore(
-    Type type, mlir::ptr::AtomicOrdering ordering, IntegerAttr alignment,
+    Type type, mlir::ptr::AtomicOrdering ordering,
+    std::optional<int64_t> alignment, const ::mlir::DataLayout *dataLayout,
     function_ref<InFlightDiagnostic()> emitError) const {
   if (emitError)
     emitError() << "memory space is read-only";
@@ -400,7 +418,8 @@ bool TestConstMemorySpaceAttr::isValidStore(
 
 bool TestConstMemorySpaceAttr::isValidAtomicOp(
     mlir::ptr::AtomicBinOp binOp, Type type, mlir::ptr::AtomicOrdering ordering,
-    IntegerAttr alignment, function_ref<InFlightDiagnostic()> emitError) const {
+    std::optional<int64_t> alignment, const ::mlir::DataLayout *dataLayout,
+    function_ref<InFlightDiagnostic()> emitError) const {
   if (emitError)
     emitError() << "memory space is read-only";
   return false;
@@ -408,7 +427,8 @@ bool TestConstMemorySpaceAttr::isValidAtomicOp(
 
 bool TestConstMemorySpaceAttr::isValidAtomicXchg(
     Type type, mlir::ptr::AtomicOrdering successOrdering,
-    mlir::ptr::AtomicOrdering failureOrdering, IntegerAttr alignment,
+    mlir::ptr::AtomicOrdering failureOrdering, std::optional<int64_t> alignment,
+    const ::mlir::DataLayout *dataLayout,
     function_ref<InFlightDiagnostic()> emitError) const {
   if (emitError)
     emitError() << "memory space is read-only";
@@ -428,6 +448,30 @@ bool TestConstMemorySpaceAttr::isValidPtrIntCast(
   if (emitError)
     emitError() << "memory space doesn't allow int-ptr casts";
   return false;
+}
+
+//===----------------------------------------------------------------------===//
+// TestAttrNewlineAndIndent
+//===----------------------------------------------------------------------===//
+
+Attribute TestAttrNewlineAndIndentAttr::parse(::mlir::AsmParser &parser,
+                                              ::mlir::Type type) {
+  Type indentType;
+  if (parser.parseLess() || parser.parseType(indentType) ||
+      parser.parseGreater()) {
+    return Attribute();
+  }
+  return get(parser.getContext(), indentType);
+}
+
+void TestAttrNewlineAndIndentAttr::print(::mlir::AsmPrinter &printer) const {
+  printer << "<";
+  printer.increaseIndent();
+  printer.printNewline();
+  printer << getIndentType();
+  printer.decreaseIndent();
+  printer.printNewline();
+  printer << ">";
 }
 
 //===----------------------------------------------------------------------===//
@@ -535,6 +579,24 @@ test::detail::TestCustomStorageCtorAttrAttrStorage::construct(
   // Note: this tests linker error ("undefined symbol"), the actual
   // implementation is not important.
   return nullptr;
+}
+
+//===----------------------------------------------------------------------===//
+// TestTensorEncodingAttr
+//===----------------------------------------------------------------------===//
+
+::llvm::LogicalResult TestTensorEncodingAttr::verifyEncoding(
+    mlir::ArrayRef<int64_t> shape, mlir::Type elementType,
+    llvm::function_ref<::mlir::InFlightDiagnostic()> emitError) const {
+  return mlir::success();
+}
+
+//===----------------------------------------------------------------------===//
+// TestMemRefLayoutAttr
+//===----------------------------------------------------------------------===//
+
+mlir::AffineMap TestMemRefLayoutAttr::getAffineMap() const {
+  return mlir::AffineMap::getMultiDimIdentityMap(1, getContext());
 }
 
 //===----------------------------------------------------------------------===//

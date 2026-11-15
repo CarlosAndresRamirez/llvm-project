@@ -49,7 +49,7 @@ struct alignas(8) NamespaceAndPrefixStorage;
 /// the global specifier ('::'). The last two specifiers can only appear at the
 /// start of a nested-namespace-specifier.
 class NestedNameSpecifier {
-  enum class FlagKind { Null, Global, Invalid };
+  enum class FlagKind { Null, Global };
   enum class StoredKind {
     Type,
     NamespaceOrSuper,
@@ -100,15 +100,11 @@ class NestedNameSpecifier {
                                              NestedNameSpecifier Prefix);
 
 public:
-  static constexpr NestedNameSpecifier getInvalid() {
-    return NestedNameSpecifier(FlagKind::Invalid);
-  }
-
   static constexpr NestedNameSpecifier getGlobal() {
     return NestedNameSpecifier(FlagKind::Global);
   }
 
-  NestedNameSpecifier() : NestedNameSpecifier(FlagKind::Invalid) {}
+  NestedNameSpecifier() = delete;
 
   /// The kind of specifier that completes this nested name
   /// specifier.
@@ -269,12 +265,8 @@ struct alignas(8) NamespaceAndPrefixStorage : NamespaceAndPrefix,
   NamespaceAndPrefixStorage(const NamespaceBaseDecl *Namespace,
                             NestedNameSpecifier Prefix)
       : NamespaceAndPrefix{Namespace, Prefix} {}
-  void Profile(llvm::FoldingSetNodeID &ID) { Profile(ID, Namespace, Prefix); }
-  static void Profile(llvm::FoldingSetNodeID &ID,
-                      const NamespaceBaseDecl *Namespace,
-                      NestedNameSpecifier Prefix) {
-    ID.AddPointer(Namespace);
-    Prefix.Profile(ID);
+  std::pair<const NamespaceBaseDecl *, NestedNameSpecifier> getKey() const {
+    return {Namespace, Prefix};
   }
 };
 
@@ -360,6 +352,9 @@ public:
 
   /// Retrieve the source range covering just the last part of
   /// this nested-name-specifier, not including the prefix.
+  ///
+  /// Note that this is the source range of this NestedNameSpecifier chunk,
+  /// and for a type this includes the prefix of that type.
   ///
   /// For example, if this instance refers to a nested-name-specifier
   /// \c \::std::vector<int>::, the returned source range would cover
@@ -447,9 +442,13 @@ class NestedNameSpecifierLocBuilder {
 public:
   NestedNameSpecifierLocBuilder() = default;
   NestedNameSpecifierLocBuilder(const NestedNameSpecifierLocBuilder &Other);
+  NestedNameSpecifierLocBuilder(NestedNameSpecifierLocBuilder &&Other);
 
   NestedNameSpecifierLocBuilder &
   operator=(const NestedNameSpecifierLocBuilder &Other);
+
+  NestedNameSpecifierLocBuilder &
+  operator=(NestedNameSpecifierLocBuilder &&Other);
 
   ~NestedNameSpecifierLocBuilder() {
     if (BufferCapacity)

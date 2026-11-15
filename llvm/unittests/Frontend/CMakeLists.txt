@@ -1,5 +1,6 @@
 set(LLVM_LINK_COMPONENTS
   Analysis
+  BinaryFormat
   Core
   FrontendHLSL
   FrontendOffloading
@@ -12,8 +13,13 @@ set(LLVM_LINK_COMPONENTS
   )
 
 add_llvm_unittest(LLVMFrontendTests
+  EnumSetTest.cpp
   HLSLBindingTest.cpp
+  HLSLInterpolationTest.cpp
   HLSLRootSignatureDumpTest.cpp
+  HLSLSemanticStagesTest.cpp
+  HLSLSemanticSignatureMetadataTest.cpp
+  HLSLSemanticSignaturePackingTest.cpp
   OpenACCTest.cpp
   OpenMPContextTest.cpp
   OpenMPIRBuilderTest.cpp

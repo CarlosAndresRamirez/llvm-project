@@ -303,8 +303,7 @@ bool TypeSpecTypeLoc::isKind(const TypeLoc &TL) {
 }
 
 bool TagTypeLoc::isDefinition() const {
-  return getTypePtr()->isTagOwned() &&
-         getOriginalDecl()->isCompleteDefinition();
+  return getTypePtr()->isTagOwned() && getDecl()->isCompleteDefinition();
 }
 
 // Reimplemented to account for GNU/C++ extension
@@ -422,11 +421,16 @@ TypeSpecifierType BuiltinTypeLoc::getWrittenTypeSpec() const {
 #include "clang/Basic/AMDGPUTypes.def"
 #define HLSL_INTANGIBLE_TYPE(Name, Id, SingletonId) case BuiltinType::Id:
 #include "clang/Basic/HLSLIntangibleTypes.def"
+#define HLSL_PACKED_TYPE(Name, Id, SingletonId) case BuiltinType::Id:
+#include "clang/Basic/HLSLPackedTypes.def"
+#define SPIRV_TYPE(Name, Id, SingletonId) case BuiltinType::Id:
+#include "clang/Basic/SPIRVTypes.def"
   case BuiltinType::BuiltinFn:
   case BuiltinType::IncompleteMatrixIdx:
   case BuiltinType::ArraySection:
   case BuiltinType::OMPArrayShaping:
   case BuiltinType::OMPIterator:
+  case BuiltinType::MetaInfo:
     return TST_unspecified;
   }
 
@@ -477,8 +481,6 @@ NestedNameSpecifierLoc TypeLoc::getPrefix() const {
     return castAs<DependentNameTypeLoc>().getQualifierLoc();
   case TypeLoc::TemplateSpecialization:
     return castAs<TemplateSpecializationTypeLoc>().getQualifierLoc();
-  case TypeLoc::DependentTemplateSpecialization:
-    return castAs<DependentTemplateSpecializationTypeLoc>().getQualifierLoc();
   case TypeLoc::DeducedTemplateSpecialization:
     return castAs<DeducedTemplateSpecializationTypeLoc>().getQualifierLoc();
   case TypeLoc::Enum:
@@ -496,46 +498,6 @@ NestedNameSpecifierLoc TypeLoc::getPrefix() const {
   }
 }
 
-SourceLocation TypeLoc::getNonPrefixBeginLoc() const {
-  switch (getTypeLocClass()) {
-  case TypeLoc::TemplateSpecialization: {
-    auto TL = castAs<TemplateSpecializationTypeLoc>();
-    SourceLocation Loc = TL.getTemplateKeywordLoc();
-    if (!Loc.isValid())
-      Loc = TL.getTemplateNameLoc();
-    return Loc;
-  }
-  case TypeLoc::DependentTemplateSpecialization: {
-    auto TL = castAs<DependentTemplateSpecializationTypeLoc>();
-    SourceLocation Loc = TL.getTemplateKeywordLoc();
-    if (!Loc.isValid())
-      Loc = TL.getTemplateNameLoc();
-    return Loc;
-  }
-  case TypeLoc::DeducedTemplateSpecialization: {
-    auto TL = castAs<DeducedTemplateSpecializationTypeLoc>();
-    SourceLocation Loc = TL.getTemplateKeywordLoc();
-    if (!Loc.isValid())
-      Loc = TL.getTemplateNameLoc();
-    return Loc;
-  }
-  case TypeLoc::DependentName:
-    return castAs<DependentNameTypeLoc>().getNameLoc();
-  case TypeLoc::Enum:
-  case TypeLoc::Record:
-  case TypeLoc::InjectedClassName:
-    return castAs<TagTypeLoc>().getNameLoc();
-  case TypeLoc::Typedef:
-    return castAs<TypedefTypeLoc>().getNameLoc();
-  case TypeLoc::UnresolvedUsing:
-    return castAs<UnresolvedUsingTypeLoc>().getNameLoc();
-  case TypeLoc::Using:
-    return castAs<UsingTypeLoc>().getNameLoc();
-  default:
-    return getBeginLoc();
-  }
-}
-
 SourceLocation TypeLoc::getNonElaboratedBeginLoc() const {
   // For elaborated types (e.g. `struct a::A`) we want the portion after the
   // `struct` but including the namespace qualifier, `a::`.
@@ -546,12 +508,6 @@ SourceLocation TypeLoc::getNonElaboratedBeginLoc() const {
         .getNonElaboratedBeginLoc();
   case TypeLoc::TemplateSpecialization: {
     auto T = castAs<TemplateSpecializationTypeLoc>();
-    if (NestedNameSpecifierLoc QualifierLoc = T.getQualifierLoc())
-      return QualifierLoc.getBeginLoc();
-    return T.getTemplateNameLoc();
-  }
-  case TypeLoc::DependentTemplateSpecialization: {
-    auto T = castAs<DependentTemplateSpecializationTypeLoc>();
     if (NestedNameSpecifierLoc QualifierLoc = T.getQualifierLoc())
       return QualifierLoc.getBeginLoc();
     return T.getTemplateNameLoc();
@@ -647,6 +603,10 @@ SourceRange BTFTagAttributedTypeLoc::getLocalSourceRange() const {
   return getAttr() ? getAttr()->getRange() : SourceRange();
 }
 
+SourceRange OverflowBehaviorTypeLoc::getLocalSourceRange() const {
+  return SourceRange();
+}
+
 void TypeOfTypeLoc::initializeLocal(ASTContext &Context,
                                        SourceLocation Loc) {
   TypeofLikeTypeLoc<TypeOfTypeLoc, TypeOfType, TypeOfTypeLocInfo>
@@ -688,20 +648,6 @@ void DependentNameTypeLoc::initializeLocal(ASTContext &Context,
   setQualifierLoc(
       initializeQualifier(Context, getTypePtr()->getQualifier(), Loc));
   setNameLoc(Loc);
-}
-
-void
-DependentTemplateSpecializationTypeLoc::initializeLocal(ASTContext &Context,
-                                                        SourceLocation Loc) {
-  initializeElaboratedKeyword(*this, Loc);
-  setQualifierLoc(initializeQualifier(
-      Context, getTypePtr()->getDependentTemplateName().getQualifier(), Loc));
-  setTemplateKeywordLoc(Loc);
-  setTemplateNameLoc(Loc);
-  setLAngleLoc(Loc);
-  setRAngleLoc(Loc);
-  TemplateSpecializationTypeLoc::initializeArgLocs(
-      Context, getTypePtr()->template_arguments(), getArgInfos(), Loc);
 }
 
 void TemplateSpecializationTypeLoc::set(SourceLocation ElaboratedKeywordLoc,
@@ -766,7 +712,6 @@ void TemplateSpecializationTypeLoc::initializeLocal(ASTContext &Context,
     QualifierLoc = Builder.getWithLocInContext(Context);
   }
 
-  TemplateArgumentListInfo TAL(Loc, Loc);
   set(ElaboratedKeywordLoc, QualifierLoc,
       /*TemplateKeywordLoc=*/HasTemplateKeyword ? Loc : SourceLocation(),
       /*NameLoc=*/Loc, /*LAngleLoc=*/Loc, /*RAngleLoc=*/Loc);
@@ -782,11 +727,12 @@ void TemplateSpecializationTypeLoc::initializeArgLocs(
     case TemplateArgument::Null:
       llvm_unreachable("Impossible TemplateArgument");
 
+    case TemplateArgument::Pack:
     case TemplateArgument::Integral:
     case TemplateArgument::Declaration:
     case TemplateArgument::NullPtr:
     case TemplateArgument::StructuralValue:
-      ArgInfos[i] = TemplateArgumentLocInfo();
+      ArgInfos[i] = TemplateArgumentLocInfo(Context, Loc);
       break;
 
     case TemplateArgument::Expression:
@@ -814,10 +760,6 @@ void TemplateSpecializationTypeLoc::initializeArgLocs(
                                                           : Loc);
       break;
     }
-
-    case TemplateArgument::Pack:
-      ArgInfos[i] = TemplateArgumentLocInfo();
-      break;
     }
   }
 }
@@ -827,9 +769,9 @@ void TemplateSpecializationTypeLoc::initializeArgLocs(
 static ConceptReference *createTrivialConceptReference(ASTContext &Context,
                                                        SourceLocation Loc,
                                                        const AutoType *AT) {
-  DeclarationNameInfo DNI =
-      DeclarationNameInfo(AT->getTypeConstraintConcept()->getDeclName(), Loc,
-                          AT->getTypeConstraintConcept()->getDeclName());
+  DeclarationName ConceptName =
+      Context.getNameForTemplate(AT->getTypeConstraintConcept(), Loc).getName();
+  DeclarationNameInfo DNI = DeclarationNameInfo(ConceptName, Loc, ConceptName);
   unsigned size = AT->getTypeConstraintArguments().size();
   llvm::SmallVector<TemplateArgumentLocInfo, 8> TALI(size);
   TemplateSpecializationTypeLoc::initializeArgLocs(
@@ -879,6 +821,10 @@ namespace {
 
     // Only these types can contain the desired 'auto' type.
 
+    TypeLoc VisitAtomicTypeLoc(AtomicTypeLoc T) {
+      return Visit(T.getValueLoc());
+    }
+
     TypeLoc VisitQualifiedTypeLoc(QualifiedTypeLoc T) {
       return Visit(T.getUnqualifiedLoc());
     }
@@ -919,6 +865,10 @@ namespace {
       return Visit(T.getWrappedLoc());
     }
 
+    TypeLoc VisitOverflowBehaviorTypeLoc(OverflowBehaviorTypeLoc T) {
+      return Visit(T.getWrappedLoc());
+    }
+
     TypeLoc
     VisitHLSLAttributedResourceTypeLoc(HLSLAttributedResourceTypeLoc T) {
       return Visit(T.getWrappedLoc());
@@ -949,8 +899,5 @@ AutoTypeLoc TypeLoc::getContainedAutoTypeLoc() const {
 SourceLocation TypeLoc::getTemplateKeywordLoc() const {
   if (const auto TSTL = getAsAdjusted<TemplateSpecializationTypeLoc>())
     return TSTL.getTemplateKeywordLoc();
-  if (const auto DTSTL =
-          getAsAdjusted<DependentTemplateSpecializationTypeLoc>())
-    return DTSTL.getTemplateKeywordLoc();
   return SourceLocation();
 }

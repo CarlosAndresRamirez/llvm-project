@@ -177,9 +177,7 @@ class WindowsSecureHotPatching : public ModulePass {
 public:
   static char ID;
 
-  WindowsSecureHotPatching() : ModulePass(ID) {
-    initializeWindowsSecureHotPatchingPass(*PassRegistry::getPassRegistry());
-  }
+  WindowsSecureHotPatching() : ModulePass(ID) {}
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.setPreservesCFG();
@@ -361,12 +359,9 @@ static GlobalVariable *getOrCreateRefVariable(
 
   auto PtrTy = PointerType::get(M->getContext(), 0);
 
-  Constant *AddrOfOldGV =
-      ConstantExpr::getGetElementPtr(PtrTy, GV, ArrayRef<Value *>{});
-
   GlobalVariable *RefGV =
       new GlobalVariable(*M, PtrTy, false, GlobalValue::LinkOnceAnyLinkage,
-                         AddrOfOldGV, Twine("__ref_").concat(GV->getName()),
+                         GV, Twine("__ref_").concat(GV->getName()),
                          nullptr, GlobalVariable::NotThreadLocal);
 
   // RefGV is created with isConstant = false, but we want to place RefGV into
@@ -460,8 +455,6 @@ static Value *rewriteGlobalVariablesInConstant(
 static bool searchConstantExprForGlobalVariables(
     Value *V, SmallDenseMap<GlobalVariable *, Value *> &GVLoadMap,
     SmallVector<GlobalVariableUse> &GVUses) {
-
-  SmallVector<Value *, 8> ReplacedOperands;
 
   if (GlobalVariable *GV = dyn_cast<GlobalVariable>(V)) {
     if (globalVariableNeedsRedirect(GV)) {
@@ -573,17 +566,13 @@ bool WindowsSecureHotPatching::runOnFunction(
   // to move them to the start of entry BB.
 
   auto &EntryBlock = F.getEntryBlock();
-  IRBuilder<> IRBuilderAtEntry(&EntryBlock, EntryBlock.begin());
+  IRBuilder<> IRBuilderAtEntry(EntryBlock.begin());
 
   for (auto &[GV, LoadValue] : GVLoadMap) {
     assert(LoadValue == nullptr);
     GlobalVariable *RefGV = getOrCreateRefVariable(F, RefMapping, GV);
     LoadValue = IRBuilderAtEntry.CreateLoad(RefGV->getValueType(), RefGV);
   }
-
-  const DISubprogram *Subprogram = F.getSubprogram();
-  DICompileUnit *Unit = Subprogram != nullptr ? Subprogram->getUnit() : nullptr;
-  DIBuilder DebugInfo{*F.getParent(), true, Unit};
 
   // Go back to the instructions and rewrite their uses of GlobalVariable.
   // Because a ConstantExpr can be a tree, it may reference more than one

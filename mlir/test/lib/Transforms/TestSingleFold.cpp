@@ -6,8 +6,10 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "../IR/DumpNotifications.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/FoldUtils.h"
+#include "llvm/ADT/SetVector.h"
 
 using namespace mlir;
 
@@ -26,32 +28,48 @@ struct TestSingleFold : public PassWrapper<TestSingleFold, OperationPass<>>,
                         public RewriterBase::Listener {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(TestSingleFold)
 
+  TestSingleFold() = default;
+  TestSingleFold(const TestSingleFold &pass) : PassWrapper(pass) {}
+
   StringRef getArgument() const final { return "test-single-fold"; }
   StringRef getDescription() const final {
     return "Test single-pass operation folding and dead constant elimination";
   }
-  // All constants in the operation post folding.
-  SmallVector<Operation *> existingConstants;
+  // Moves can report the same constant more than once. Keep each constant
+  // once so that cleanup cannot visit an operation after erasing it.
+  llvm::SmallSetVector<Operation *, 8> existingConstants;
 
   void foldOperation(Operation *op, OperationFolder &helper);
   void runOnOperation() override;
 
   void notifyOperationInserted(Operation *op,
                                OpBuilder::InsertPoint previous) override {
-    existingConstants.push_back(op);
+    if (dumpNotifications)
+      notificationPrinter.notifyOperationInserted(op, previous);
+    existingConstants.insert(op);
   }
   void notifyOperationErased(Operation *op) override {
-    auto *it = llvm::find(existingConstants, op);
-    if (it != existingConstants.end())
-      existingConstants.erase(it);
+    if (dumpNotifications)
+      notificationPrinter.notifyOperationErased(op);
+    existingConstants.remove(op);
   }
+
+  DumpNotifications notificationPrinter;
+  Option<bool> dumpNotifications{
+      *this, "dump-notifications",
+      llvm::cl::desc("Print insertion and erasure notifications"),
+      llvm::cl::init(false)};
+  Option<int> maxIterations{*this, "max-iterations",
+                            llvm::cl::desc("Max iterations in the tryToFold"),
+                            llvm::cl::init(1)};
 };
 } // namespace
 
 void TestSingleFold::foldOperation(Operation *op, OperationFolder &helper) {
   // Attempt to fold the specified operation, including handling unused or
   // duplicated constants.
-  (void)helper.tryToFold(op);
+  bool inPlaceUpdate = false;
+  (void)helper.tryToFold(op, &inPlaceUpdate, maxIterations);
 }
 
 void TestSingleFold::runOnOperation() {

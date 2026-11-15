@@ -1,9 +1,14 @@
-//===-- Implementation of dladdr ------------------------------------------===//
+//===----------------------------------------------------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+//===----------------------------------------------------------------------===//
+///
+/// \file
+/// Implementation of dladdr
+///
 //===----------------------------------------------------------------------===//
 
 #include "dladdr.h"
@@ -15,8 +20,9 @@ namespace LIBC_NAMESPACE_DECL {
 
 // TODO: https:// github.com/llvm/llvm-project/issues/97929
 LLVM_LIBC_FUNCTION(int, dladdr,
-                   (const void *__restrict addr, Dl_info *__restrict info)) {
-  return -1;
+                   ([[maybe_unused]] const void *__restrict addr,
+                    [[maybe_unused]] Dl_info *__restrict info)) {
+  return 0; // Returns 0 on fail, nonzero on success.
 }
 
 } // namespace LIBC_NAMESPACE_DECL

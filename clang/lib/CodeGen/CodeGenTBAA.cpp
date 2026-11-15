@@ -25,6 +25,7 @@
 #include "clang/AST/RecordLayout.h"
 #include "clang/Basic/CodeGenOptions.h"
 #include "clang/Basic/TargetInfo.h"
+#include "clang/CodeGenUtils/RecordLayoutUtils.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
@@ -310,7 +311,7 @@ llvm::MDNode *CodeGenTBAA::getTypeInfoHelper(const Type *Ty) {
       // This also covers anonymous structs and unions, which have a different
       // compatibility rule, but it doesn't matter because you can never have a
       // pointer to an anonymous struct or union.
-      if (!RT->getOriginalDecl()->getDeclName())
+      if (!RT->getDecl()->getDeclName())
         return getAnyPtr(PtrDepth);
 
       // For non-builtin types use the mangled name of the canonical type.
@@ -329,10 +330,21 @@ llvm::MDNode *CodeGenTBAA::getTypeInfoHelper(const Type *Ty) {
   if (CodeGenOpts.NewStructPathTBAA && Ty->isArrayType())
     return getTypeInfo(cast<ArrayType>(Ty)->getElementType());
 
+  // Accesses to matrix types are accesses to objects of their element types.
+  if (const auto *MTy = dyn_cast<MatrixType>(Ty)) {
+    assert(isa<ConstantMatrixType>(Ty) &&
+           "only ConstantMatrixType should reach CodeGen");
+    return getTypeInfo(MTy->getElementType());
+  }
+
+  // Accesses to complex types are accesses to objects of their element types.
+  if (const auto *CTy = dyn_cast<ComplexType>(Ty))
+    return getTypeInfo(CTy->getElementType());
+
   // Enum types are distinct types. In C++ they have "underlying types",
   // however they aren't related for TBAA.
   if (const EnumType *ETy = dyn_cast<EnumType>(Ty)) {
-    const EnumDecl *ED = ETy->getOriginalDecl()->getDefinitionOrSelf();
+    const EnumDecl *ED = ETy->getDecl()->getDefinitionOrSelf();
     if (!Features.CPlusPlus)
       return getTypeInfo(ED->getIntegerType());
 
@@ -433,7 +445,7 @@ CodeGenTBAA::CollectFields(uint64_t BaseOffset,
           llvm::MDBuilder::TBAAStructField(BaseOffset, Size, TBAATag));
       return true;
     }
-    const RecordDecl *RD = TTy->getOriginalDecl()->getDefinition();
+    const RecordDecl *RD = TTy->getDecl()->getDefinition();
     if (RD->hasFlexibleArrayMember())
       return false;
 
@@ -448,7 +460,7 @@ CodeGenTBAA::CollectFields(uint64_t BaseOffset,
     unsigned idx = 0;
     for (RecordDecl::field_iterator i = RD->field_begin(), e = RD->field_end();
          i != e; ++i, ++idx) {
-      if (isEmptyFieldForLayout(Context, *i))
+      if (CodeGenUtils::isEmptyFieldForLayout(Context, *i))
         continue;
 
       uint64_t Offset =
@@ -485,6 +497,18 @@ CodeGenTBAA::CollectFields(uint64_t BaseOffset,
     return true;
   }
 
+  if (const auto *CTy = QTy->getAsCanonical<ComplexType>()) {
+    QualType ElemQTy = CTy->getElementType();
+    uint64_t Size = Context.getTypeSizeInChars(ElemQTy).getQuantity();
+    llvm::MDNode *TBAAType = MayAlias ? getChar() : getTypeInfo(ElemQTy);
+    llvm::MDNode *TBAATag = getAccessTagInfo(TBAAAccessInfo(TBAAType, Size));
+    Fields.push_back(
+        llvm::MDBuilder::TBAAStructField(BaseOffset, Size, TBAATag));
+    Fields.push_back(
+        llvm::MDBuilder::TBAAStructField(BaseOffset + Size, Size, TBAATag));
+    return true;
+  }
+
   /* Otherwise, treat whatever it is as a field. */
   uint64_t Offset = BaseOffset;
   uint64_t Size = Context.getTypeSizeInChars(QTy).getQuantity();
@@ -514,7 +538,7 @@ CodeGenTBAA::getTBAAStructInfo(QualType QTy) {
 
 llvm::MDNode *CodeGenTBAA::getBaseTypeInfoHelper(const Type *Ty) {
   if (auto *TTy = dyn_cast<RecordType>(Ty)) {
-    const RecordDecl *RD = TTy->getOriginalDecl()->getDefinition();
+    const RecordDecl *RD = TTy->getDecl()->getDefinition();
     const ASTRecordLayout &Layout = Context.getASTRecordLayout(RD);
     using TBAAStructField = llvm::MDBuilder::TBAAStructField;
     SmallVector<TBAAStructField, 4> Fields;
@@ -609,8 +633,7 @@ llvm::MDNode *CodeGenTBAA::getValidBaseTypeInfo(QualType QTy) {
   // First calculate the metadata, before recomputing the insertion point, as
   // the helper can recursively call us.
   llvm::MDNode *TypeNode = getBaseTypeInfoHelper(Ty);
-  LLVM_ATTRIBUTE_UNUSED auto inserted =
-      BaseTypeMetadataCache.insert({Ty, TypeNode});
+  [[maybe_unused]] auto inserted = BaseTypeMetadataCache.insert({Ty, TypeNode});
   assert(inserted.second && "BaseType metadata was already inserted");
 
   return TypeNode;

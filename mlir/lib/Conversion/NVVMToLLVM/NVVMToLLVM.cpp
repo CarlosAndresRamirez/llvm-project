@@ -16,9 +16,10 @@
 #include "mlir/Conversion/ConvertToLLVM/ToLLVMInterface.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/BasicPtxBuilderInterface.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
-#include "mlir/Dialect/LLVMIR/NVVMDialect.h"
+#include "mlir/Dialect/LLVMIR/NVVMDialectDecl.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/TypeUtilities.h"
@@ -26,6 +27,7 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Support/LLVM.h"
 #include "llvm/Support/DebugLog.h"
+#include "llvm/Support/LogicalResult.h"
 #include "llvm/Support/raw_ostream.h"
 
 #define DEBUG_TYPE "nvvm-to-llvm"
@@ -62,7 +64,8 @@ struct PtxLowering
     PtxBuilder generator(op, rewriter, needsManualMapping);
     for (auto &[asmValue, modifier] : asmValues) {
       LDBG() << asmValue << "\t Modifier : " << modifier;
-      generator.insertValue(asmValue, modifier);
+      if (failed(generator.insertValue(asmValue, modifier)))
+        return failure();
     }
 
     generator.buildAndReplaceOp();
@@ -91,7 +94,9 @@ struct ConvertNVVMToLLVMPass
 
 /// Implement the interface to convert NVVM to LLVM.
 struct NVVMToLLVMDialectInterface : public ConvertToLLVMPatternInterface {
-  using ConvertToLLVMPatternInterface::ConvertToLLVMPatternInterface;
+  NVVMToLLVMDialectInterface(Dialect *dialect)
+      : ConvertToLLVMPatternInterface(dialect) {}
+
   void loadDependentDialects(MLIRContext *context) const final {
     context->loadDialect<NVVMDialect>();
   }

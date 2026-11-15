@@ -24,7 +24,6 @@ public:
 
 private:
   ABIArgInfo classifyReturnType(QualType RetTy) const;
-  ABIArgInfo classifyArgumentType(QualType RetTy) const;
   ABIArgInfo classifyArgumentType(QualType RetTy, unsigned *RegsLeft) const;
 
   void computeInfo(CGFunctionInfo &FI) const override;
@@ -152,6 +151,12 @@ ABIArgInfo HexagonABIInfo::classifyReturnType(QualType RetTy) const {
       if (Size == VecSize || Size == 2*VecSize)
         return ABIArgInfo::getDirectInReg();
     }
+    // HLX vectors are returned in HLX registers or register pairs.
+    if (T.hasFeature("hlx")) {
+      uint64_t VecSize = 2048 * 8;
+      if (Size == VecSize || Size == 2 * VecSize)
+        return ABIArgInfo::getDirectInReg();
+    }
     // Large vector types should be returned via memory.
     if (Size > 64)
       return getNaturalAlignIndirect(RetTy,
@@ -210,7 +215,7 @@ Address HexagonABIInfo::EmitVAArgFromMemory(CodeGenFunction &CGF,
 
     // Create a mask which should be "AND"ed
     // with (overflow_arg_area + align - 1)
-    llvm::Value *Mask = llvm::ConstantInt::get(CGF.Int32Ty, -(int)Align);
+    llvm::Value *Mask = llvm::ConstantInt::getSigned(CGF.Int32Ty, -(int)Align);
     __overflow_area_pointer = CGF.Builder.CreateIntToPtr(
         CGF.Builder.CreateAnd(AsInt, Mask), __overflow_area_pointer->getType(),
         "__overflow_area_pointer.align");
@@ -316,10 +321,10 @@ Address HexagonABIInfo::EmitVAArgForHexagonLinux(CodeGenFunction &CGF,
         llvm::ConstantInt::get(CGF.Int32Ty, (ArgAlign - 1)),
         "align_current_saved_reg_area_pointer");
 
-    __current_saved_reg_area_pointer_int =
-        CGF.Builder.CreateAnd(__current_saved_reg_area_pointer_int,
-                              llvm::ConstantInt::get(CGF.Int32Ty, -ArgAlign),
-                              "align_current_saved_reg_area_pointer");
+    __current_saved_reg_area_pointer_int = CGF.Builder.CreateAnd(
+        __current_saved_reg_area_pointer_int,
+        llvm::ConstantInt::getSigned(CGF.Int32Ty, -ArgAlign),
+        "align_current_saved_reg_area_pointer");
 
     __current_saved_reg_area_pointer =
         CGF.Builder.CreateIntToPtr(__current_saved_reg_area_pointer_int,
@@ -367,10 +372,10 @@ Address HexagonABIInfo::EmitVAArgForHexagonLinux(CodeGenFunction &CGF,
                               llvm::ConstantInt::get(CGF.Int32Ty, ArgAlign - 1),
                               "align_overflow_area_pointer");
 
-    __overflow_area_pointer_int =
-        CGF.Builder.CreateAnd(__overflow_area_pointer_int,
-                              llvm::ConstantInt::get(CGF.Int32Ty, -ArgAlign),
-                              "align_overflow_area_pointer");
+    __overflow_area_pointer_int = CGF.Builder.CreateAnd(
+        __overflow_area_pointer_int,
+        llvm::ConstantInt::getSigned(CGF.Int32Ty, -ArgAlign),
+        "align_overflow_area_pointer");
 
     __overflow_area_pointer = CGF.Builder.CreateIntToPtr(
         __overflow_area_pointer_int, __overflow_area_pointer->getType(),

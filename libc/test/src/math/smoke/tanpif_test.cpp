@@ -6,7 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "src/__support/libc_errno.h"
+#include "hdr/errno_macros.h"
 #include "src/math/tanpif.h"
 #include "test/UnitTest/FPMatcher.h"
 #include "test/UnitTest/Test.h"
@@ -14,8 +14,6 @@
 using LlvmLibcTanpifTest = LIBC_NAMESPACE::testing::FPTest<float>;
 
 TEST_F(LlvmLibcTanpifTest, SpecialNumbers) {
-  libc_errno = 0;
-
   EXPECT_FP_EQ_WITH_EXCEPTION(aNaN, LIBC_NAMESPACE::tanpif(sNaN), FE_INVALID);
   EXPECT_MATH_ERRNO(0);
 
@@ -33,4 +31,15 @@ TEST_F(LlvmLibcTanpifTest, SpecialNumbers) {
 
   EXPECT_FP_EQ(aNaN, LIBC_NAMESPACE::tanpif(neg_inf));
   EXPECT_MATH_ERRNO(EDOM);
+
+  EXPECT_FP_EQ_WITH_EXCEPTION(0x1.1abe4p-130f,
+                              LIBC_NAMESPACE::tanpif(0x1.68p-132f),
+                              FE_UNDERFLOW | FE_INEXACT);
+  EXPECT_MATH_ERRNO(ERANGE);
+
+  EXPECT_FP_EQ_WITH_EXCEPTION(1.0f, LIBC_NAMESPACE::tanpif(2.25f), 0);
+  EXPECT_MATH_ERRNO(0);
+
+  EXPECT_FP_EQ_WITH_EXCEPTION(inf, LIBC_NAMESPACE::tanpif(0.5f), FE_DIVBYZERO);
+  EXPECT_MATH_ERRNO(ERANGE);
 }

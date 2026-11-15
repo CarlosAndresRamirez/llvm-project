@@ -15,8 +15,10 @@
 #include "mlir/Dialect/LLVMIR/LLVMAttrs.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
+#include "mlir/Dialect/Ptr/IR/PtrAttrs.h"
 #include "mlir/Dialect/Ptr/IR/PtrOps.h"
 #include "mlir/IR/TypeUtilities.h"
+#include "llvm/Support/LogicalResult.h"
 #include <type_traits>
 
 using namespace mlir;
@@ -71,6 +73,16 @@ struct TypeOffsetOpConversion
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
   LogicalResult
   matchAndRewrite(ptr::TypeOffsetOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override;
+};
+
+//===----------------------------------------------------------------------===//
+// ConstantOpConversion
+//===----------------------------------------------------------------------===//
+struct ConstantOpConversion : public ConvertOpToLLVMPattern<ptr::ConstantOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+  LogicalResult
+  matchAndRewrite(ptr::ConstantOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override;
 };
 } // namespace
@@ -169,7 +181,7 @@ LogicalResult FromPtrOpConversion::matchAndRewrite(
   // Set the allocated and aligned pointers.
   desc.setAllocatedPtr(
       rewriter, loc,
-      rewriter.create<LLVM::ExtractValueOp>(loc, adaptor.getMetadata(), 0));
+      LLVM::ExtractValueOp::create(rewriter, loc, adaptor.getMetadata(), 0));
   desc.setAlignedPtr(rewriter, loc, adaptor.getPtr());
 
   // Extract metadata from the passed struct.
@@ -177,8 +189,8 @@ LogicalResult FromPtrOpConversion::matchAndRewrite(
 
   // Set dynamic offset if needed.
   if (offset == ShapedType::kDynamic) {
-    Value offsetValue = rewriter.create<LLVM::ExtractValueOp>(
-        loc, adaptor.getMetadata(), fieldIdx++);
+    Value offsetValue = LLVM::ExtractValueOp::create(
+        rewriter, loc, adaptor.getMetadata(), fieldIdx++);
     desc.setOffset(rewriter, loc, offsetValue);
   } else {
     desc.setConstantOffset(rewriter, loc, offset);
@@ -187,8 +199,8 @@ LogicalResult FromPtrOpConversion::matchAndRewrite(
   // Set dynamic sizes if needed.
   for (auto [i, dim] : llvm::enumerate(shape)) {
     if (dim == ShapedType::kDynamic) {
-      Value sizeValue = rewriter.create<LLVM::ExtractValueOp>(
-          loc, adaptor.getMetadata(), fieldIdx++);
+      Value sizeValue = LLVM::ExtractValueOp::create(
+          rewriter, loc, adaptor.getMetadata(), fieldIdx++);
       desc.setSize(rewriter, loc, i, sizeValue);
     } else {
       desc.setConstantSize(rewriter, loc, i, dim);
@@ -198,8 +210,8 @@ LogicalResult FromPtrOpConversion::matchAndRewrite(
   // Set dynamic strides if needed.
   for (auto [i, stride] : llvm::enumerate(strides)) {
     if (stride == ShapedType::kDynamic) {
-      Value strideValue = rewriter.create<LLVM::ExtractValueOp>(
-          loc, adaptor.getMetadata(), fieldIdx++);
+      Value strideValue = LLVM::ExtractValueOp::create(
+          rewriter, loc, adaptor.getMetadata(), fieldIdx++);
       desc.setStride(rewriter, loc, i, strideValue);
     } else {
       desc.setConstantStride(rewriter, loc, i, stride);
@@ -243,35 +255,36 @@ LogicalResult GetMetadataOpConversion::matchAndRewrite(
 
   // Create a new LLVM struct to hold the metadata
   Location loc = op.getLoc();
-  Value sV = rewriter.create<LLVM::UndefOp>(loc, *mdTy);
+  Value sV = LLVM::UndefOp::create(rewriter, loc, *mdTy);
 
   // First element is the allocated pointer.
-  sV = rewriter.create<LLVM::InsertValueOp>(
-      loc, sV, descriptor.allocatedPtr(rewriter, loc), 0);
+  SmallVector<int64_t> pos{0};
+  sV = LLVM::InsertValueOp::create(rewriter, loc, sV,
+                                   descriptor.allocatedPtr(rewriter, loc), pos);
 
   // Track the current field index.
   unsigned fieldIdx = 1;
 
   // Add dynamic offset if needed.
   if (offset == ShapedType::kDynamic) {
-    sV = rewriter.create<LLVM::InsertValueOp>(
-        loc, sV, descriptor.offset(rewriter, loc), fieldIdx++);
+    sV = LLVM::InsertValueOp::create(
+        rewriter, loc, sV, descriptor.offset(rewriter, loc), fieldIdx++);
   }
 
   // Add dynamic sizes if needed.
   for (auto [i, dim] : llvm::enumerate(shape)) {
     if (dim != ShapedType::kDynamic)
       continue;
-    sV = rewriter.create<LLVM::InsertValueOp>(
-        loc, sV, descriptor.size(rewriter, loc, i), fieldIdx++);
+    sV = LLVM::InsertValueOp::create(
+        rewriter, loc, sV, descriptor.size(rewriter, loc, i), fieldIdx++);
   }
 
   // Add dynamic strides if needed
   for (auto [i, stride] : llvm::enumerate(strides)) {
     if (stride != ShapedType::kDynamic)
       continue;
-    sV = rewriter.create<LLVM::InsertValueOp>(
-        loc, sV, descriptor.stride(rewriter, loc, i), fieldIdx++);
+    sV = LLVM::InsertValueOp::create(
+        rewriter, loc, sV, descriptor.stride(rewriter, loc, i), fieldIdx++);
   }
   rewriter.replaceOp(op, sV);
   return success();
@@ -286,8 +299,14 @@ PtrAddOpConversion::matchAndRewrite(ptr::PtrAddOp op, OpAdaptor adaptor,
                                     ConversionPatternRewriter &rewriter) const {
   // Get and check the base.
   Value base = adaptor.getBase();
-  if (!isa<LLVM::LLVMPointerType>(base.getType()))
+  if (!isa<LLVM::LLVMPointerType>(getElementTypeOrSelf(base.getType())))
     return rewriter.notifyMatchFailure(op, "Incompatible pointer type");
+
+  // A vector offset can broadcast a scalar base to a vector result.
+  Type resultType = getTypeConverter()->convertType(op.getType());
+  if (!resultType ||
+      !isa<LLVM::LLVMPointerType>(getElementTypeOrSelf(resultType)))
+    return rewriter.notifyMatchFailure(op, "Incompatible result type");
 
   // Get the offset.
   Value offset = adaptor.getOffset();
@@ -313,8 +332,8 @@ PtrAddOpConversion::matchAndRewrite(ptr::PtrAddOp op, OpAdaptor adaptor,
   }
 
   // Create the GEP operation with appropriate arguments
-  rewriter.replaceOpWithNewOp<LLVM::GEPOp>(op, base.getType(), elementType,
-                                           base, ValueRange{offset}, flags);
+  rewriter.replaceOpWithNewOp<LLVM::GEPOp>(op, resultType, elementType, base,
+                                           ValueRange{offset}, flags);
   return success();
 }
 
@@ -370,13 +389,45 @@ LogicalResult TypeOffsetOpConversion::matchAndRewrite(
 }
 
 //===----------------------------------------------------------------------===//
+// ConstantOpConversion
+//===----------------------------------------------------------------------===//
+
+LogicalResult ConstantOpConversion::matchAndRewrite(
+    ptr::ConstantOp op, OpAdaptor adaptor,
+    ConversionPatternRewriter &rewriter) const {
+  TypedAttr value = op.getValue();
+  Type resultType = getTypeConverter()->convertType(op.getType());
+  if (!resultType)
+    return rewriter.notifyMatchFailure(op, "Couldn't convert the result type");
+
+  if (isa<ptr::NullAttr>(value)) {
+    rewriter.replaceOpWithNewOp<LLVM::ZeroOp>(op, resultType);
+    return success();
+  }
+  auto addrAttr = dyn_cast<ptr::AddressAttr>(value);
+  // Early-exit if unknown attribute.
+  if (!addrAttr) {
+    return rewriter.notifyMatchFailure(
+        op, "unsupported value attribute kind: " +
+                value.getAbstractAttribute().getName());
+  }
+  Type intType = rewriter.getIntegerType(addrAttr.getValue().getBitWidth());
+  Value intConst = LLVM::ConstantOp::create(rewriter, op.getLoc(), intType,
+                                            addrAttr.getValue());
+  rewriter.replaceOpWithNewOp<LLVM::IntToPtrOp>(op, resultType, intConst);
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // ConvertToLLVMPatternInterface implementation
 //===----------------------------------------------------------------------===//
 
 namespace {
 /// Implement the interface to convert Ptr to LLVM.
 struct PtrToLLVMDialectInterface : public ConvertToLLVMPatternInterface {
-  using ConvertToLLVMPatternInterface::ConvertToLLVMPatternInterface;
+  PtrToLLVMDialectInterface(Dialect *dialect)
+      : ConvertToLLVMPatternInterface(dialect) {}
+
   void loadDependentDialects(MLIRContext *context) const final {
     context->loadDialect<LLVM::LLVMDialect>();
   }
@@ -430,7 +481,8 @@ void mlir::ptr::populatePtrToLLVMConversionPatterns(
 
   // Add conversion patterns.
   patterns.add<FromPtrOpConversion, GetMetadataOpConversion, PtrAddOpConversion,
-               ToPtrOpConversion, TypeOffsetOpConversion>(converter);
+               ToPtrOpConversion, TypeOffsetOpConversion, ConstantOpConversion>(
+      converter);
 }
 
 void mlir::ptr::registerConvertPtrToLLVMInterface(DialectRegistry &registry) {

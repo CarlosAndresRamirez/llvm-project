@@ -83,7 +83,15 @@ namespace llvm {
 
     /// Mark this value as unused.
     void markUnused() { def = SlotIndex(); }
+
+    LLVM_ABI void print(raw_ostream &OS) const;
+    LLVM_ABI void dump() const;
   };
+
+  inline raw_ostream &operator<<(raw_ostream &OS, const VNInfo &VNI) {
+    VNI.print(OS);
+    return OS;
+  }
 
   /// Result of a LiveRange query. This class hides the implementation details
   /// of live ranges, and it should be used as the primary interface for
@@ -448,7 +456,7 @@ namespace llvm {
     /// overlaps - Return true if the intersection of the two live ranges is
     /// not empty.
     bool overlaps(const LiveRange &other) const {
-      if (other.empty())
+      if (empty() || other.empty())
         return false;
       return overlapsFrom(other, other.begin());
     }
@@ -481,6 +489,13 @@ namespace llvm {
     /// appropriate.  This returns an iterator to the inserted segment (which
     /// may have grown since it was inserted).
     LLVM_ABI iterator addSegment(Segment S);
+
+    /// Merge the segment pointed to by @p I with its immediate neighbors when
+    /// they use the same value number and touch it. @p I must be a valid
+    /// iterator into this live range. Returns an iterator to the merged
+    /// segment, which may be @p I or the previous segment if @p I was merged
+    /// into it.
+    LLVM_ABI iterator mergeAdjacentSegments(iterator I);
 
     /// Attempt to extend a value defined after @p StartIdx to include @p Use.
     /// Both @p StartIdx and @p Use should be in the same basic block. In case
@@ -1015,8 +1030,9 @@ namespace llvm {
   public:
     explicit ConnectedVNInfoEqClasses(LiveIntervals &lis) : LIS(lis) {}
 
-    /// Classify the values in \p LR into connected components.
-    /// Returns the number of connected components.
+    /// Classify the values in \p LR into connected components. A component
+    /// made only of phi-defs in unreachable blocks has no def of its own, so
+    /// it is joined with one that does. Returns the number of components.
     LLVM_ABI unsigned Classify(const LiveRange &LR);
 
     /// getEqClass - Classify creates equivalence classes numbered 0..N. Return

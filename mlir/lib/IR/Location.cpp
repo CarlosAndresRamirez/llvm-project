@@ -52,8 +52,8 @@ struct FileLineColRangeAttrStorage final
         FileLineColRangeAttrStorage::totalSizeToAlloc<unsigned>(locEnc - 1);
     auto *rawMem =
         allocator.allocate(byteSize, alignof(FileLineColRangeAttrStorage));
-    auto *result = ::new (rawMem) FileLineColRangeAttrStorage(
-        std::move(std::get<0>(tblgenKey)), locEnc - 1);
+    auto *result = ::new (rawMem)
+        FileLineColRangeAttrStorage(std::get<0>(tblgenKey), locEnc - 1);
     if (numInArray > 0) {
       ArrayRef<unsigned> elements = std::get<1>(tblgenKey);
       result->startLine = elements[0];
@@ -109,6 +109,10 @@ struct FileLineColRangeAttrStorage final
   unsigned startLine = 0;
 };
 } // namespace mlir::detail
+
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
+void Location::dump() const { impl.dump(); }
+#endif
 
 //===----------------------------------------------------------------------===//
 /// Tablegen Attribute Definitions

@@ -108,24 +108,26 @@ define <4 x i32> @load_v4i8_v4i32(ptr %p) {
 define <4 x i32> @load_v4i12_v4i32(ptr %p) {
 ; CHECK-LABEL: load_v4i12_v4i32:
 ; CHECK:       // %bb.0:
-; CHECK-NEXT:    ldr x8, [x0]
-; CHECK-NEXT:    ldr w9, [x0, #8]
-; CHECK-NEXT:    lsr x10, x8, #60
-; CHECK-NEXT:    ubfx x11, x8, #48, #12
-; CHECK-NEXT:    ubfx w12, w9, #8, #12
-; CHECK-NEXT:    orr w10, w10, w9, lsl #4
-; CHECK-NEXT:    fmov s0, w11
-; CHECK-NEXT:    and w11, w8, #0xfff
-; CHECK-NEXT:    fmov s1, w11
-; CHECK-NEXT:    lsr x9, x9, #20
-; CHECK-NEXT:    and w10, w10, #0xfff
-; CHECK-NEXT:    mov v0.h[1], w10
+; CHECK-NEXT:    ldur w8, [x0, #6]
+; CHECK-NEXT:    ldr w12, [x0]
+; CHECK-NEXT:    ldrh w11, [x0, #10]
+; CHECK-NEXT:    ldrh w13, [x0, #4]
+; CHECK-NEXT:    and w9, w8, #0xfff
 ; CHECK-NEXT:    ubfx w10, w8, #12, #12
+; CHECK-NEXT:    orr x8, x8, x11, lsl #32
+; CHECK-NEXT:    fmov s0, w9
+; CHECK-NEXT:    and w9, w12, #0xfff
+; CHECK-NEXT:    fmov s1, w9
+; CHECK-NEXT:    ubfx x8, x8, #24, #12
+; CHECK-NEXT:    orr x9, x12, x13, lsl #32
+; CHECK-NEXT:    mov v0.h[1], w10
+; CHECK-NEXT:    ubfx w10, w12, #12, #12
 ; CHECK-NEXT:    mov v1.h[1], w10
-; CHECK-NEXT:    ubfx x10, x8, #24, #12
-; CHECK-NEXT:    ubfx x8, x8, #36, #12
-; CHECK-NEXT:    mov v0.h[2], w12
-; CHECK-NEXT:    mov v1.h[2], w10
+; CHECK-NEXT:    mov v0.h[2], w8
+; CHECK-NEXT:    ubfx x8, x9, #24, #12
+; CHECK-NEXT:    ubfx w9, w11, #4, #12
+; CHECK-NEXT:    mov v1.h[2], w8
+; CHECK-NEXT:    ubfx w8, w13, #4, #12
 ; CHECK-NEXT:    mov v0.h[3], w9
 ; CHECK-NEXT:    mov v1.h[3], w8
 ; CHECK-NEXT:    ushll v0.4s, v0.4h, #3
@@ -263,16 +265,14 @@ define <16 x i16> @load_v16i8(ptr %p) {
 define <2 x i16> @std_v2i8_v2i16(ptr %p) {
 ; CHECK-LABEL: std_v2i8_v2i16:
 ; CHECK:       // %bb.0:
-; CHECK-NEXT:    ldrb w8, [x0, #2]
-; CHECK-NEXT:    ldrb w9, [x0, #3]
-; CHECK-NEXT:    fmov s0, w8
-; CHECK-NEXT:    ldrb w8, [x0]
-; CHECK-NEXT:    fmov s1, w8
-; CHECK-NEXT:    mov v0.s[1], w9
-; CHECK-NEXT:    ldrb w9, [x0, #1]
-; CHECK-NEXT:    mov v1.s[1], w9
+; CHECK-NEXT:    ldr h0, [x0, #2]
+; CHECK-NEXT:    ldr h1, [x0]
+; CHECK-NEXT:    ushll v0.8h, v0.8b, #0
+; CHECK-NEXT:    ushll v1.8h, v1.8b, #0
+; CHECK-NEXT:    ushll v0.4s, v0.4h, #0
 ; CHECK-NEXT:    shl v0.2s, v0.2s, #3
-; CHECK-NEXT:    add v0.2s, v1.2s, v0.2s
+; CHECK-NEXT:    uaddw v0.4s, v0.4s, v1.4h
+; CHECK-NEXT:    // kill: def $d0 killed $d0 killed $q0
 ; CHECK-NEXT:    ret
   %l1 = load <2 x i8>, ptr %p
   %q = getelementptr i8, ptr %p, i32 2
@@ -1367,15 +1367,13 @@ define <4 x i32> @atomic(ptr %p) {
 ; CHECK-LABEL: atomic:
 ; CHECK:       // %bb.0:
 ; CHECK-NEXT:    ldar w8, [x0]
-; CHECK-NEXT:    movi v0.2d, #0x0000ff000000ff
-; CHECK-NEXT:    ldr s1, [x0, #4]
-; CHECK-NEXT:    fmov s2, w8
-; CHECK-NEXT:    ushll v1.8h, v1.8b, #0
-; CHECK-NEXT:    zip1 v2.8b, v2.8b, v0.8b
-; CHECK-NEXT:    ushll v1.4s, v1.4h, #3
-; CHECK-NEXT:    ushll v2.4s, v2.4h, #0
-; CHECK-NEXT:    and v0.16b, v2.16b, v0.16b
-; CHECK-NEXT:    add v0.4s, v0.4s, v1.4s
+; CHECK-NEXT:    ldr s0, [x0, #4]
+; CHECK-NEXT:    fmov s1, w8
+; CHECK-NEXT:    zip1 v1.8b, v1.8b, v0.8b
+; CHECK-NEXT:    ushll v0.8h, v0.8b, #0
+; CHECK-NEXT:    ushll v0.4s, v0.4h, #3
+; CHECK-NEXT:    bic v1.4h, #255, lsl #8
+; CHECK-NEXT:    uaddw v0.4s, v0.4s, v1.4h
 ; CHECK-NEXT:    ret
   %l1b = load atomic float, ptr %p acquire, align 4
   %l1 = bitcast float %l1b to <4 x i8>
@@ -1394,12 +1392,12 @@ define <4 x i32> @volatile(ptr %p) {
 ; CHECK:       // %bb.0:
 ; CHECK-NEXT:    sub sp, sp, #16
 ; CHECK-NEXT:    .cfi_def_cfa_offset 16
-; CHECK-NEXT:    ldr s0, [x0]
-; CHECK-NEXT:    ldr s1, [x0, #4]
-; CHECK-NEXT:    ushll v1.8h, v1.8b, #0
+; CHECK-NEXT:    ldr s0, [x0, #4]
+; CHECK-NEXT:    ldr s1, [x0]
 ; CHECK-NEXT:    ushll v0.8h, v0.8b, #0
-; CHECK-NEXT:    ushll v1.4s, v1.4h, #3
-; CHECK-NEXT:    uaddw v0.4s, v1.4s, v0.4h
+; CHECK-NEXT:    ushll v1.8h, v1.8b, #0
+; CHECK-NEXT:    ushll v0.4s, v0.4h, #3
+; CHECK-NEXT:    uaddw v0.4s, v0.4s, v1.4h
 ; CHECK-NEXT:    add sp, sp, #16
 ; CHECK-NEXT:    ret
   %l1b = load volatile float, ptr %p

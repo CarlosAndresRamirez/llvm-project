@@ -41,13 +41,51 @@
 ; RUN:	-r=%t.o,_ZdaPv, \
 ; RUN:	-r=%t.o,sleep, \
 ; RUN:	-r=%t.o,_Znam, \
+; RUN:	-pass-remarks-output=%t.remarks.yaml \
+; RUN:	-o %t.out.2 2>&1
+; RUN: FileCheck %s --check-prefix=REMARKSONLY < %t.remarks.yaml
+
+;; Test that we still get remarks when a filter matches.
+; RUN: llvm-lto2 run %t.o -enable-memprof-context-disambiguation \
+; RUN:	-supports-hot-cold-new \
+; RUN:	-r=%t.o,main,plx \
+; RUN:	-r=%t.o,_ZdaPv, \
+; RUN:	-r=%t.o,sleep, \
+; RUN:	-r=%t.o,_Znam, \
+; RUN:	-pass-remarks-filter=memprof-context-disambiguation \
+; RUN:	-pass-remarks-output=%t.remarks.filter.yaml \
+; RUN:	-o %t.out.3 2>&1
+; RUN: FileCheck %s --check-prefix=REMARKSONLY < %t.remarks.filter.yaml
+
+;; Test that we don't get remarks when the filter doesn't match.
+; RUN: llvm-lto2 run %t.o -enable-memprof-context-disambiguation \
+; RUN:	-supports-hot-cold-new \
+; RUN:	-r=%t.o,main,plx \
+; RUN:	-r=%t.o,_ZdaPv, \
+; RUN:	-r=%t.o,sleep, \
+; RUN:	-r=%t.o,_Znam, \
+; RUN:	-pass-remarks-filter=nomatch \
+; RUN:	-pass-remarks-output=%t.remarks.nomatch.yaml \
+; RUN:	-o %t.out.4 2>&1
+; RUN: count 0 < %t.remarks.nomatch.yaml
+
+; REMARKSONLY: MemProf hinting: NotCold full allocation context 123 with total size 100 is NotCold after cloning (internal context id 1)
+; REMARKSONLY: MemProf hinting: Cold full allocation context 456 with total size 200 is Cold after cloning (internal context id 2)
+; REMARKSONLY: MemProf hinting: Cold full allocation context 789 with total size 300 is Cold after cloning (internal context id 2)
+
+; RUN: llvm-lto2 run %t.o -enable-memprof-context-disambiguation \
+; RUN:	-supports-hot-cold-new \
+; RUN:	-r=%t.o,main,plx \
+; RUN:	-r=%t.o,_ZdaPv, \
+; RUN:	-r=%t.o,sleep, \
+; RUN:	-r=%t.o,_Znam, \
 ; RUN:	-memprof-verify-ccg -memprof-verify-nodes -memprof-dump-ccg \
 ; RUN:	-memprof-export-to-dot -memprof-dot-file-path-prefix=%t. \
 ; RUN:	-memprof-report-hinted-sizes \
 ; RUN:	-stats -pass-remarks=memprof-context-disambiguation -save-temps \
 ; RUN:	-o %t.out 2>&1 | FileCheck %s --check-prefix=DUMP --check-prefix=DUMP-SIZES \
 ; RUN:	--check-prefix=STATS --check-prefix=STATS-BE --check-prefix=REMARKS \
-; RUN:  --check-prefix=SIZES
+; RUN:  --check-prefix=SIZES --check-prefix=REMARK-LINK
 
 ; RUN:	cat %t.ccg.postbuild.dot | FileCheck %s --check-prefix=DOT
 ;; We should have cloned bar, baz, and foo, for the cold memory allocation.
@@ -70,7 +108,7 @@
 ; RUN:	-memprof-report-hinted-sizes \
 ; RUN:	-stats -pass-remarks=memprof-context-disambiguation \
 ; RUN:	-o %t2.out 2>&1 | FileCheck %s --check-prefix=DUMP \
-; RUN:	--check-prefix=STATS --check-prefix=SIZES
+; RUN:	--check-prefix=STATS --check-prefix=SIZES --check-prefix=REMARK-LINK
 
 ; RUN:	cat %t2.ccg.postbuild.dot | FileCheck %s --check-prefix=DOT
 ;; We should have cloned bar, baz, and foo, for the cold memory allocation.
@@ -85,6 +123,30 @@
 ; RUN:  -stats -pass-remarks=memprof-context-disambiguation \
 ; RUN:  %t.o -S 2>&1 | FileCheck %s --check-prefix=IR \
 ; RUN:  --check-prefix=STATS-BE --check-prefix=REMARKS
+
+;; Try again with distributed ThinLTO, but disable the alloc context in the
+;; combined index (the default in NDEBUG builds). This simulates the case where
+;; the thin link is performed by a release build and the backend has assertions
+;; enabled. Ensure the backend's assertion checking of the alloc contexts
+;; gracefully handles their absence.
+; RUN: cp %t.o %t.nocontext.o
+; RUN: llvm-lto2 run %t.nocontext.o -enable-memprof-context-disambiguation \
+; RUN:	-supports-hot-cold-new \
+; RUN:  -thinlto-distributed-indexes \
+; RUN:  -combined-index-memprof-context=false \
+; RUN:	-r=%t.nocontext.o,main,plx \
+; RUN:	-r=%t.nocontext.o,_ZdaPv, \
+; RUN:	-r=%t.nocontext.o,sleep, \
+; RUN:	-r=%t.nocontext.o,_Znam, \
+; RUN:	-o %t3.out
+; RUN: llvm-dis %t.nocontext.o.thinlto.bc -o - | FileCheck %s --check-prefix=DISTRIB-NOCONTEXT
+; RUN: opt -passes=memprof-context-disambiguation \
+; RUN:	-memprof-import-summary=%t.nocontext.o.thinlto.bc \
+; RUN:  -stats -pass-remarks=memprof-context-disambiguation \
+; RUN:  %t.nocontext.o -S 2>&1 | FileCheck %s --check-prefix=IR \
+; RUN:  --check-prefix=STATS-BE --check-prefix=REMARKS
+
+; DISTRIB-NOCONTEXT: allocs: ((versions: (notcold, cold), memProf: ((type: notcold, stackIds: ()), (type: cold, stackIds: ()))))
 
 source_filename = "memprof-basic.ll"
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"
@@ -103,7 +165,9 @@ declare i32 @sleep()
 
 define internal ptr @_Z3barv() #0 !dbg !15 {
 entry:
-  %call = call ptr @_Znam(i64 0), !memprof !2, !callsite !7
+  ;; Use an ambiguous attribute for this allocation, which is now added to such
+  ;; allocations during matching. It should not affect cloning.
+  %call = call ptr @_Znam(i64 0) #1, !memprof !2, !callsite !7
   ret ptr null
 }
 
@@ -125,6 +189,7 @@ entry:
 uselistorder ptr @_Z3foov, { 1, 0 }
 
 attributes #0 = { noinline optnone }
+attributes #1 = { "memprof"="ambiguous" }
 
 !llvm.dbg.cu = !{!13}
 !llvm.module.flags = !{!20, !21}
@@ -286,9 +351,12 @@ attributes #0 = { noinline optnone }
 ; DUMP: 		Edge from Callee [[BAR2]] to Caller: [[BAZ2]] AllocTypes: Cold ContextIds: 2
 ; DUMP:		Clone of [[BAR]]
 
-; SIZES: NotCold full allocation context 123 with total size 100 is NotCold after cloning (context id 1)
-; SIZES: Cold full allocation context 456 with total size 200 is Cold after cloning (context id 2)
-; SIZES: Cold full allocation context 789 with total size 300 is Cold after cloning (context id 2)
+; SIZES: NotCold full allocation context 123 with total size 100 is NotCold after cloning (internal context id 1)
+; REMARK-LINK: <unknown>:0:0: MemProf hinting: NotCold full allocation context 123 with total size 100 is NotCold after cloning (internal context id 1)
+; SIZES: Cold full allocation context 456 with total size 200 is Cold after cloning (internal context id 2)
+; REMARK-LINK: <unknown>:0:0: MemProf hinting: Cold full allocation context 456 with total size 200 is Cold after cloning (internal context id 2)
+; SIZES: Cold full allocation context 789 with total size 300 is Cold after cloning (internal context id 2)
+; REMARK-LINK: <unknown>:0:0: MemProf hinting: Cold full allocation context 789 with total size 300 is Cold after cloning (internal context id 2)
 
 ; REMARKS: call in clone main assigned to call function clone _Z3foov.memprof.1
 ; REMARKS: created clone _Z3barv.memprof.1
@@ -341,34 +409,34 @@ attributes #0 = { noinline optnone }
 
 ; DOT: digraph "postbuild" {
 ; DOT: 	label="postbuild";
-; DOT: 	Node[[BAR:0x[a-z0-9]+]] [shape=record,tooltip="N[[BAR]] ContextIds: 1 2",fillcolor="mediumorchid1",style="filled",label="{OrigId: Alloc0\n_Z3barv -\> alloc}"];
-; DOT: 	Node[[BAZ:0x[a-z0-9]+]] [shape=record,tooltip="N[[BAZ]] ContextIds: 1 2",fillcolor="mediumorchid1",style="filled",label="{OrigId: 12481870273128938184\n_Z3bazv -\> _Z3barv}"];
+; DOT: 	Node[[BAR:0x[a-z0-9]+]] [shape=record,tooltip="N[[BAR]] ContextIds: 1 2",fillcolor="mediumorchid1",style="filled",label="{OrigId: Alloc0{{.*}}\n_Z3barv -\> alloc}"];
+; DOT: 	Node[[BAZ:0x[a-z0-9]+]] [shape=record,tooltip="N[[BAZ]] ContextIds: 1 2",fillcolor="mediumorchid1",style="filled",label="{OrigId: 12481870273128938184{{.*}}\n_Z3bazv -\> _Z3barv}"];
 ; DOT: 	Node[[BAZ]] -> Node[[BAR]][tooltip="ContextIds: 1 2",fillcolor="mediumorchid1",color="mediumorchid1"];
-; DOT: 	Node[[FOO:0x[a-z0-9]+]] [shape=record,tooltip="N[[FOO]] ContextIds: 1 2",fillcolor="mediumorchid1",style="filled",label="{OrigId: 2732490490862098848\n_Z3foov -\> _Z3bazv}"];
+; DOT: 	Node[[FOO:0x[a-z0-9]+]] [shape=record,tooltip="N[[FOO]] ContextIds: 1 2",fillcolor="mediumorchid1",style="filled",label="{OrigId: 2732490490862098848{{.*}}\n_Z3foov -\> _Z3bazv}"];
 ; DOT: 	Node[[FOO]] -> Node[[BAZ]][tooltip="ContextIds: 1 2",fillcolor="mediumorchid1",color="mediumorchid1"];
-; DOT: 	Node[[MAIN1:0x[a-z0-9]+]] [shape=record,tooltip="N[[MAIN1]] ContextIds: 1",fillcolor="brown1",style="filled",label="{OrigId: 8632435727821051414\nmain -\> _Z3foov}"];
+; DOT: 	Node[[MAIN1:0x[a-z0-9]+]] [shape=record,tooltip="N[[MAIN1]] ContextIds: 1",fillcolor="brown1",style="filled",label="{OrigId: 8632435727821051414{{.*}}\nmain -\> _Z3foov}"];
 ; DOT: 	Node[[MAIN1]] -> Node[[FOO]][tooltip="ContextIds: 1",fillcolor="brown1",color="brown1"];
-; DOT: 	Node[[MAIN2:0x[a-z0-9]+]] [shape=record,tooltip="N[[MAIN2]] ContextIds: 2",fillcolor="cyan",style="filled",label="{OrigId: 15025054523792398438\nmain -\> _Z3foov}"];
+; DOT: 	Node[[MAIN2:0x[a-z0-9]+]] [shape=record,tooltip="N[[MAIN2]] ContextIds: 2",fillcolor="cyan",style="filled",label="{OrigId: 15025054523792398438{{.*}}\nmain -\> _Z3foov}"];
 ; DOT: 	Node[[MAIN2]] -> Node[[FOO]][tooltip="ContextIds: 2",fillcolor="cyan",color="cyan"];
 ; DOT: }
 
 
 ; DOTCLONED: digraph "cloned" {
 ; DOTCLONED: 	label="cloned";
-; DOTCLONED: 	Node[[BAR:0x[a-z0-9]+]] [shape=record,tooltip="N[[BAR]] ContextIds: 1",fillcolor="brown1",style="filled",label="{OrigId: Alloc0\n_Z3barv -\> alloc}"];
-; DOTCLONED: 	Node[[BAZ:0x[a-z0-9]+]] [shape=record,tooltip="N[[BAZ]] ContextIds: 1",fillcolor="brown1",style="filled",label="{OrigId: 12481870273128938184\n_Z3bazv -\> _Z3barv}"];
+; DOTCLONED: 	Node[[BAR:0x[a-z0-9]+]] [shape=record,tooltip="N[[BAR]] ContextIds: 1",fillcolor="brown1",style="filled",label="{OrigId: Alloc0{{.*}}\n_Z3barv -\> alloc}"];
+; DOTCLONED: 	Node[[BAZ:0x[a-z0-9]+]] [shape=record,tooltip="N[[BAZ]] ContextIds: 1",fillcolor="brown1",style="filled",label="{OrigId: 12481870273128938184{{.*}}\n_Z3bazv -\> _Z3barv}"];
 ; DOTCLONED: 	Node[[BAZ]] -> Node[[BAR]][tooltip="ContextIds: 1",fillcolor="brown1",color="brown1"];
-; DOTCLONED: 	Node[[FOO:0x[a-z0-9]+]] [shape=record,tooltip="N[[FOO]] ContextIds: 1",fillcolor="brown1",style="filled",label="{OrigId: 2732490490862098848\n_Z3foov -\> _Z3bazv}"];
+; DOTCLONED: 	Node[[FOO:0x[a-z0-9]+]] [shape=record,tooltip="N[[FOO]] ContextIds: 1",fillcolor="brown1",style="filled",label="{OrigId: 2732490490862098848{{.*}}\n_Z3foov -\> _Z3bazv}"];
 ; DOTCLONED: 	Node[[FOO]] -> Node[[BAZ]][tooltip="ContextIds: 1",fillcolor="brown1",color="brown1"];
-; DOTCLONED: 	Node[[MAIN1:0x[a-z0-9]+]] [shape=record,tooltip="N[[MAIN1]] ContextIds: 1",fillcolor="brown1",style="filled",label="{OrigId: 8632435727821051414\nmain -\> _Z3foov}"];
+; DOTCLONED: 	Node[[MAIN1:0x[a-z0-9]+]] [shape=record,tooltip="N[[MAIN1]] ContextIds: 1",fillcolor="brown1",style="filled",label="{OrigId: 8632435727821051414{{.*}}\nmain -\> _Z3foov}"];
 ; DOTCLONED: 	Node[[MAIN1]] -> Node[[FOO]][tooltip="ContextIds: 1",fillcolor="brown1",color="brown1"];
-; DOTCLONED: 	Node[[MAIN2:0x[a-z0-9]+]] [shape=record,tooltip="N[[MAIN2]] ContextIds: 2",fillcolor="cyan",style="filled",label="{OrigId: 15025054523792398438\nmain -\> _Z3foov}"];
+; DOTCLONED: 	Node[[MAIN2:0x[a-z0-9]+]] [shape=record,tooltip="N[[MAIN2]] ContextIds: 2",fillcolor="cyan",style="filled",label="{OrigId: 15025054523792398438{{.*}}\nmain -\> _Z3foov}"];
 ; DOTCLONED: 	Node[[MAIN2]] -> Node[[FOO2:0x[a-z0-9]+]][tooltip="ContextIds: 2",fillcolor="cyan",color="cyan"];
-; DOTCLONED: 	Node[[FOO2]] [shape=record,tooltip="N[[FOO2]] ContextIds: 2",fillcolor="cyan",color="blue",style="filled,bold,dashed",label="{OrigId: 0\n_Z3foov -\> _Z3bazv}"];
+; DOTCLONED: 	Node[[FOO2]] [shape=record,tooltip="N[[FOO2]] ContextIds: 2",fillcolor="cyan",color="blue",style="filled,bold,dashed",label="{OrigId: 0{{.*}}\n_Z3foov -\> _Z3bazv}"];
 ; DOTCLONED: 	Node[[FOO2]] -> Node[[BAZ2:0x[a-z0-9]+]][tooltip="ContextIds: 2",fillcolor="cyan",color="cyan"];
-; DOTCLONED: 	Node[[BAZ2]] [shape=record,tooltip="N[[BAZ2]] ContextIds: 2",fillcolor="cyan",color="blue",style="filled,bold,dashed",label="{OrigId: 0\n_Z3bazv -\> _Z3barv}"];
+; DOTCLONED: 	Node[[BAZ2]] [shape=record,tooltip="N[[BAZ2]] ContextIds: 2",fillcolor="cyan",color="blue",style="filled,bold,dashed",label="{OrigId: 0{{.*}}\n_Z3bazv -\> _Z3barv}"];
 ; DOTCLONED: 	Node[[BAZ2]] -> Node[[BAR2:0x[a-z0-9]+]][tooltip="ContextIds: 2",fillcolor="cyan",color="cyan"];
-; DOTCLONED: 	Node[[BAR2]] [shape=record,tooltip="N[[BAR2]] ContextIds: 2",fillcolor="cyan",color="blue",style="filled,bold,dashed",label="{OrigId: Alloc0\n_Z3barv -\> alloc}"];
+; DOTCLONED: 	Node[[BAR2]] [shape=record,tooltip="N[[BAR2]] ContextIds: 2",fillcolor="cyan",color="blue",style="filled,bold,dashed",label="{OrigId: Alloc0{{.*}}\n_Z3barv -\> alloc}"];
 ; DOTCLONED: }
 
 ;; Here we are just ensuring that the post-function assign dot graph includes

@@ -11,10 +11,21 @@ add_flang_library(FortranUtils
 
   DEPENDS
   FIRDialect
+  FIRBuilder
+  HLFIRDialect
 
   LINK_LIBS
   FIRDialect
-
+  FIRDialectSupport
+  FIRBuilder
+  FIRSupport
+  FortranEvaluate
+  FortranSupport
+  HLFIRDialect
+ 
   MLIR_LIBS
+  MLIRSupport
   MLIROpenMPDialect
+  MLIRTransformUtils
+  MLIRArithDialect
 )

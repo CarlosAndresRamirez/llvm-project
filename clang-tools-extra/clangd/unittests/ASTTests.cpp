@@ -16,6 +16,7 @@
 #include "clang/AST/Attr.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclBase.h"
+#include "clang/AST/DeclTemplate.h"
 #include "clang/Basic/AttrKinds.h"
 #include "clang/Basic/SourceManager.h"
 #include "llvm/ADT/StringRef.h"
@@ -244,7 +245,8 @@ TEST(GetDeducedType, KwAutoKwDecltypeExpansion) {
     for (Position Pos : File.points()) {
       auto Location = sourceLocationInMainFile(SM.get(), Pos);
       ASSERT_TRUE(!!Location) << llvm::toString(Location.takeError());
-      auto DeducedType = getDeducedType(AST.getASTContext(), *Location);
+      auto DeducedType = getDeducedType(AST.getASTContext(),
+                                        AST.getHeuristicResolver(), *Location);
       if (T.DeducedType == nullptr) {
         EXPECT_FALSE(DeducedType);
       } else {

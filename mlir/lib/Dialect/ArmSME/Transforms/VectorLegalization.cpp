@@ -175,7 +175,7 @@ int getNumberOfSMETilesForVectorType(VectorType type) {
 /// tiles by decomposing them into tile-sized operations.
 struct LegalizeArithConstantOpsByDecomposition
     : public OpConversionPattern<arith::ConstantOp> {
-  using OpConversionPattern::OpConversionPattern;
+  using Base::Base;
 
   LogicalResult
   matchAndRewrite(arith::ConstantOp constantOp, OpAdaptor adaptor,
@@ -204,7 +204,7 @@ struct LegalizeArithConstantOpsByDecomposition
 /// decomposing them into tile-sized operations.
 struct LegalizeVectorOuterProductOpsByDecomposition
     : public OpConversionPattern<vector::OuterProductOp> {
-  using OpConversionPattern::OpConversionPattern;
+  using Base::Base;
 
   LogicalResult
   matchAndRewrite(vector::OuterProductOp outerProductOp,
@@ -247,7 +247,7 @@ struct LegalizeVectorOuterProductOpsByDecomposition
           !accSMETiles.empty() ? accSMETiles[index] : Value{},
           outerProductOp.getKind());
 
-      auto maskedOuterProduct =
+      auto *maskedOuterProduct =
           vector::maskOperation(rewriter, smeOuterProduct, smeMask);
       resultSMETiles.push_back(maskedOuterProduct->getResult(0));
     }
@@ -264,7 +264,7 @@ struct LegalizeVectorOuterProductOpsByDecomposition
 // `vector.outerproduct` pattern to work around this issue.
 struct LegalizeMaskedVectorOuterProductOpsByDecomposition
     : public OpConversionPattern<vector::MaskOp> {
-  using OpConversionPattern::OpConversionPattern;
+  using Base::Base;
 
   LogicalResult
   matchAndRewrite(vector::MaskOp maskOp, OneToNOpAdaptor adaptor,
@@ -284,7 +284,7 @@ struct LegalizeMaskedVectorOuterProductOpsByDecomposition
 /// decomposing them into tile-sized operations.
 struct LegalizeTransferReadOpsByDecomposition
     : public OpConversionPattern<vector::TransferReadOp> {
-  using OpConversionPattern::OpConversionPattern;
+  using Base::Base;
 
   LogicalResult
   matchAndRewrite(vector::TransferReadOp readOp, OneToNOpAdaptor adaptor,
@@ -332,7 +332,7 @@ struct LegalizeTransferReadOpsByDecomposition
 /// decomposing them into tile-sized operations.
 struct LegalizeTransferWriteOpsByDecomposition
     : public OpConversionPattern<vector::TransferWriteOp> {
-  using OpConversionPattern::OpConversionPattern;
+  using Base::Base;
 
   LogicalResult
   matchAndRewrite(vector::TransferWriteOp writeOp, OneToNOpAdaptor adaptor,
@@ -414,7 +414,7 @@ struct LegalizeTransferWriteOpsByDecomposition
 /// ```
 struct LegalizeMultiTileTransferWriteAsStoreLoop
     : public OpConversionPattern<vector::TransferWriteOp> {
-  using OpConversionPattern::OpConversionPattern;
+  using Base::Base;
 
   LogicalResult
   matchAndRewrite(vector::TransferWriteOp writeOp, OneToNOpAdaptor adaptor,
@@ -542,7 +542,7 @@ struct FoldExtractFromVectorOfSMELikeCreateMasks
                                 PatternRewriter &rewriter) const override {
     auto loc = extractOp.getLoc();
     auto createMaskOp =
-        extractOp.getVector().getDefiningOp<vector::CreateMaskOp>();
+        extractOp.getSource().getDefiningOp<vector::CreateMaskOp>();
     if (!createMaskOp)
       return rewriter.notifyMatchFailure(
           extractOp, "extract not from vector.create_mask op");
@@ -758,7 +758,7 @@ struct LiftIllegalVectorTransposeToMemory
 /// Values larger than a single tile are supported via decomposition.
 struct LowerIllegalTransposeStoreViaZA
     : public OpRewritePattern<vector::TransferWriteOp> {
-  using OpRewritePattern::OpRewritePattern;
+  using Base::Base;
 
   LogicalResult matchAndRewrite(vector::TransferWriteOp writeOp,
                                 PatternRewriter &rewriter) const override {
@@ -903,7 +903,7 @@ struct LowerIllegalTransposeStoreViaZA
 ///  required.
 struct LowerColumnTransferReadToLoops
     : public OpRewritePattern<vector::TransferReadOp> {
-  using OpRewritePattern::OpRewritePattern;
+  using Base::Base;
 
   LogicalResult matchAndRewrite(vector::TransferReadOp readOp,
                                 PatternRewriter &rewriter) const override {
@@ -943,7 +943,9 @@ struct LowerColumnTransferReadToLoops
     auto upperBound = createVscaleMultiple(numRows);
     auto step = arith::ConstantIndexOp::create(rewriter, loc, 1);
     Value init = arith::ConstantOp::create(
-        rewriter, loc, newResType, DenseElementsAttr::get(newResType, 0.0f));
+        rewriter, loc, newResType,
+        DenseElementsAttr::get(newResType,
+                               rewriter.getZeroAttr(resType.getElementType())));
 
     scf::ForOp loadLoop;
     {

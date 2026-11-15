@@ -25,10 +25,11 @@ using namespace llvm;
 static_assert(sizeof(MCSymbol) <= 24, "Keep the base symbol small");
 
 // Only the address of this fragment is ever actually used.
-static MCFragment SentinelFragment;
+alignas(MCFragment) static char SentinelFragment[sizeof(MCFragment)];
 
 // Sentinel value for the absolute pseudo fragment.
-MCFragment *MCSymbol::AbsolutePseudoFragment = &SentinelFragment;
+MCFragment *MCSymbol::AbsolutePseudoFragment =
+    reinterpret_cast<MCFragment *>(SentinelFragment);
 
 void *MCSymbol::operator new(size_t s, const MCSymbolTableEntry *Name,
                              MCContext &Ctx) {
@@ -84,7 +85,21 @@ void MCSymbol::print(raw_ostream &OS, const MCAsmInfo *MAI) const {
 }
 
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
-LLVM_DUMP_METHOD void MCSymbol::dump() const {
-  dbgs() << *this;
-}
+LLVM_DUMP_METHOD void MCSymbol::dump() const { dbgs() << *this; }
 #endif
+
+// Determine whether the offset between two labels can change at link time.
+// Currently, this function is used only in DWARF info emission logic, where it
+// helps generate more optimal debug info when the offset between labels is
+// constant at link time.
+bool llvm::isRangeRelaxable(const MCSymbol *Begin, const MCSymbol *End) {
+  assert(Begin && "Range without a begin symbol?");
+  assert(End && "Range without an end symbol?");
+  for (const auto *Fragment = Begin->getFragment();
+       Fragment != End->getFragment(); Fragment = Fragment->getNext()) {
+    assert(Fragment);
+    if (Fragment->isLinkerRelaxable())
+      return true;
+  }
+  return false;
+}

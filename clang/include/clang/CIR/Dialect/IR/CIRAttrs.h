@@ -13,11 +13,12 @@
 #ifndef CLANG_CIR_DIALECT_IR_CIRATTRS_H
 #define CLANG_CIR_DIALECT_IR_CIRATTRS_H
 
-#include "mlir/IR/Attributes.h"
-#include "mlir/IR/BuiltinAttributeInterfaces.h"
+#include "mlir/Dialect/Ptr/IR/MemorySpaceInterfaces.h"
+#include "clang/Basic/AddressSpaces.h"
 
 #include "clang/CIR/Dialect/IR/CIROpsEnums.h"
 
+#include "clang/CIR/Interfaces/ASTAttrInterfaces.h"
 #include "clang/CIR/Interfaces/CIRTypeInterfaces.h"
 
 //===----------------------------------------------------------------------===//
@@ -34,6 +35,7 @@ namespace cir {
 class ArrayType;
 class BoolType;
 class ComplexType;
+class DataMemberType;
 class IntType;
 class MethodType;
 class PointerType;

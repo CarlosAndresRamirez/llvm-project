@@ -64,16 +64,21 @@ public:
   // Each symbol file can claim to support one or more symbol file abilities.
   // These get returned from SymbolFile::GetAbilities(). These help us to
   // determine which plug-in will be best to load the debug information found
-  // in files.
+  // in files. Symbols is the least-significant bit so a plug-in reporting any
+  // other ability ranks ahead of one reporting only Symbols.
   enum Abilities {
-    CompileUnits = (1u << 0),
-    LineTables = (1u << 1),
-    Functions = (1u << 2),
-    Blocks = (1u << 3),
-    GlobalVariables = (1u << 4),
-    LocalVariables = (1u << 5),
-    VariableTypes = (1u << 6),
-    kAllAbilities = ((1u << 7) - 1u)
+    Symbols = (1u << 0),
+    CompileUnits = (1u << 1),
+    LineTables = (1u << 2),
+    Functions = (1u << 3),
+    Blocks = (1u << 4),
+    GlobalVariables = (1u << 5),
+    LocalVariables = (1u << 6),
+    VariableTypes = (1u << 7),
+    /// All detailed debug-information abilities. Symbols is excluded because
+    /// it describes information from the object file's symbol table.
+    kAllAbilities = CompileUnits | LineTables | Functions | Blocks |
+        GlobalVariables | LocalVariables | VariableTypes
   };
 
   static SymbolFile *FindPlugin(lldb::ObjectFileSP objfile_sp);
@@ -149,7 +154,9 @@ public:
 
   virtual lldb::LanguageType ParseLanguage(CompileUnit &comp_unit) = 0;
   /// Return the Xcode SDK comp_unit was compiled against.
-  virtual XcodeSDK ParseXcodeSDK(CompileUnit &comp_unit) { return {}; }
+  virtual XcodeSDKAndSysroot ParseXcodeSDK(CompileUnit &comp_unit) {
+    return {};
+  }
 
   /// This function exists because SymbolFileDWARFDebugMap may extra compile
   /// units which aren't exposed as "real" compile units. In every other
@@ -297,7 +304,8 @@ public:
                        lldb::SymbolContextItem resolve_scope,
                        SymbolContextList &sc_list);
 
-  virtual void DumpClangAST(Stream &s, llvm::StringRef filter) {}
+  virtual void DumpClangAST(Stream &s, llvm::StringRef filter,
+                            bool show_colors) {}
   virtual void FindGlobalVariables(ConstString name,
                                    const CompilerDeclContext &parent_decl_ctx,
                                    uint32_t max_matches,
@@ -306,6 +314,9 @@ public:
                                    uint32_t max_matches,
                                    VariableList &variables);
   virtual void FindFunctions(const Module::LookupInfo &lookup_info,
+                             const CompilerDeclContext &parent_decl_ctx,
+                             bool include_inlines, SymbolContextList &sc_list);
+  virtual void FindFunctions(llvm::ArrayRef<Module::LookupInfo> lookup_infos,
                              const CompilerDeclContext &parent_decl_ctx,
                              bool include_inlines, SymbolContextList &sc_list);
   virtual void FindFunctions(const RegularExpression &regex,
@@ -332,12 +343,12 @@ public:
   /// Resolves the function corresponding to the specified LLDB function
   /// call \c label.
   ///
-  /// \param[in] label The FunctionCallLabel to be resolved.
+  /// \param[in,out] label The FunctionCallLabel to be resolved.
   ///
   /// \returns An llvm::Error if the specified \c label couldn't be resolved.
   ///          Returns the resolved function (as a SymbolContext) otherwise.
   virtual llvm::Expected<SymbolContext>
-  ResolveFunctionCallLabel(const FunctionCallLabel &label) {
+  ResolveFunctionCallLabel(FunctionCallLabel &label) {
     return llvm::createStringError("Not implemented");
   }
 
@@ -373,6 +384,12 @@ public:
     return {};
   }
 
+  /// Add symbols from this SymbolFile to the ObjectFile's symbol table.
+  ///
+  /// Adding symbols marks the symbol table with
+  /// lldb::eSymtabStateSymbolFileAddedSymbols. An implementation that only
+  /// updates existing symbols must call Symtab::SetSymbolFileAddedSymbols()
+  /// itself.
   virtual void AddSymbols(Symtab &symtab) {}
 
   /// Notify the SymbolFile that the file addresses in the Sections
@@ -393,7 +410,8 @@ public:
 
   /// Return the number of stack bytes taken up by the parameters to this
   /// function.
-  virtual llvm::Expected<lldb::addr_t> GetParameterStackSize(Symbol &symbol) {
+  virtual llvm::Expected<lldb::addr_t>
+  GetParameterStackSize(const Symbol &symbol) {
     return llvm::createStringError(make_error_code(llvm::errc::not_supported),
                                    "Operation not supported.");
   }
@@ -488,13 +506,28 @@ public:
     return false;
   };
 
-  /// Get number of loaded/parsed DWO files. This is emitted in "statistics
-  /// dump"
+  /// Retrieves statistics about DWO files associated with this symbol file.
+  /// This function returns a DWOStats struct containing:
+  ///   - The number of successfully loaded/parsed DWO files.
+  ///   - The total number of DWO files encountered.
+  ///   - The number of DWO CUs that failed to load due to errors.
+  /// If this symbol file does not support DWO files, all counts will be zero.
   ///
   /// \returns
-  ///     A pair containing (loaded_dwo_count, total_dwo_count). If this
-  ///     symbol file doesn't support DWO files, both counts will be 0.
-  virtual std::pair<uint32_t, uint32_t> GetDwoFileCounts() { return {0, 0}; }
+  ///   A DWOStats struct with loaded, total, and error counts for DWO files.
+  virtual DWOStats GetDwoStats() { return {}; }
+
+  /// Return a map of separate debug info files that are loaded.
+  ///
+  /// Unlike GetSeparateDebugInfo(), this function will only return the list of
+  /// files, if there are errors they are simply ignored. This function will
+  /// always return a valid list, even if it is empty.
+  ///
+  /// \return
+  ///     A unique list of all the filespecs, or an empty list.
+  virtual lldb_private::ModuleSpecList GetSeparateDebugInfoFiles() {
+    return {};
+  }
 
   virtual lldb::TypeSP
   MakeType(lldb::user_id_t uid, ConstString name,
@@ -516,6 +549,12 @@ public:
   }
 
   std::string GetObjectName() const;
+
+  /// Get the semantically innermost non-function type that encloses the
+  /// provided variable
+  virtual lldb::TypeSP GetTypeEnclosingVariableUID(lldb::user_id_t uid) {
+    return {};
+  }
 
 protected:
   void AssertModuleLock();

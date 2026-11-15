@@ -647,7 +647,7 @@ TEST_F(ProgramEnvTest, TestLockFileExclusive) {
 
   ASSERT_TRUE(Finished);
   ASSERT_NO_ERROR(fs::unlockFile(FD1));
-  ProcessInfo WaitResult = llvm::sys::Wait(PI2, /*SecondsToWait=*/1, &Error);
+  ProcessInfo WaitResult = llvm::sys::Wait(PI2, /*SecondsToWait=*/5, &Error);
   ASSERT_TRUE(Error.empty());
   ASSERT_EQ(0, WaitResult.ReturnCode);
   ASSERT_EQ(WaitResult.Pid, PI2.Pid);
@@ -677,6 +677,37 @@ TEST_F(ProgramEnvTest, TestExecuteWithNoStacktraceHandler) {
   int RetCode = ExecuteAndWait(Executable, argv, getEnviron(), {}, 0, 0, &Error,
                                &ExecutionFailed);
   EXPECT_FALSE(ExecutionFailed) << Error;
+  ASSERT_EQ(0, RetCode);
+}
+
+TEST_F(ProgramEnvTest, TestExecuteEmptyEnvironment) {
+  using namespace llvm::sys;
+
+  std::string Executable =
+      sys::fs::getMainExecutable(TestMainArgv0, &ProgramTestStringArg1);
+  StringRef argv[] = {
+      Executable,
+      "--gtest_filter=" // A null invocation to avoid infinite recursion
+  };
+
+  std::string Error;
+  bool ExecutionFailed;
+  [[maybe_unused]] int RetCode =
+      ExecuteAndWait(Executable, argv, ArrayRef<StringRef>{}, {}, 0, 0, &Error,
+                     &ExecutionFailed);
+  EXPECT_FALSE(ExecutionFailed) << Error;
+#ifdef _WIN32
+  // When running with an empty environment, the child process doesn't in herit
+  // the PATH variable. On MinGW, it is common for executables to require a
+  // shared libstdc++ or libc++ DLL, which may be in PATH but not in the
+  // directory of SupportTests.exe - leading to STATUS_DLL_NOT_FOUND errors.
+  // Therefore, waive this failure in MinGW environments.
+  // This can also happen in MSVC mode environments when the unittest is linked
+  // against LLVM.dll.
+  // 0xC0000135 is the STATUS_DLL_NOT_FOUND error, so ignore it on Windows.
+  if (RetCode == static_cast<int>(0xC0000135))
+    RetCode = 0;
+#endif
   ASSERT_EQ(0, RetCode);
 }
 

@@ -312,6 +312,9 @@ struct OpOrInterfaceRewritePatternBase : public RewritePattern {
 template <typename SourceOp>
 struct OpRewritePattern
     : public mlir::detail::OpOrInterfaceRewritePatternBase<SourceOp> {
+  /// Type alias to allow derived classes to inherit constructors with
+  /// `using Base::Base;`.
+  using Base = OpRewritePattern;
 
   /// Patterns must specify the root operation name they match against, and can
   /// also specify the benefit of the pattern matching and a list of generated
@@ -328,6 +331,9 @@ struct OpRewritePattern
 template <typename SourceOp>
 struct OpInterfaceRewritePattern
     : public mlir::detail::OpOrInterfaceRewritePatternBase<SourceOp> {
+  /// Type alias to allow derived classes to inherit constructors with
+  /// `using Base::Base;`.
+  using Base = OpInterfaceRewritePattern;
 
   OpInterfaceRewritePattern(MLIRContext *context, PatternBenefit benefit = 1)
       : mlir::detail::OpOrInterfaceRewritePatternBase<SourceOp>(
@@ -341,6 +347,10 @@ struct OpInterfaceRewritePattern
 template <template <typename> class TraitType>
 class OpTraitRewritePattern : public RewritePattern {
 public:
+  /// Type alias to allow derived classes to inherit constructors with
+  /// `using Base::Base;`.
+  using Base = OpTraitRewritePattern;
+
   OpTraitRewritePattern(MLIRContext *context, PatternBenefit benefit = 1)
       : RewritePattern(Pattern::MatchTraitOpTypeTag(), TypeID::get<TraitType>(),
                        benefit, context) {}
@@ -535,6 +545,19 @@ public:
   /// This method erases all operations in a block.
   virtual void eraseBlock(Block *block);
 
+  /// Erase the operands selected by `eraseIndices` and update
+  /// operandSegmentSizes if the operation has AttrSizedOperandSegments. The bit
+  /// vector must have one entry for each original operand. The caller must
+  /// select operands that the operation permits removing and update any other
+  /// dependent metadata.
+  void eraseOperands(Operation *op, const BitVector &eraseIndices);
+
+  /// Erase the specified results of the given operation. Results cannot be
+  /// erased directly, so the implementation creates a new replacement
+  /// operation and erases the original operation. The new operation is
+  /// returned.
+  Operation *eraseOpResults(Operation *op, const BitVector &eraseIndices);
+
   /// Inline the operations of block 'source' into block 'dest' before the given
   /// position. The source block will be deleted and must have no uses.
   /// 'argValues' is used to replace the block arguments of 'source'.
@@ -633,7 +656,7 @@ public:
 
   /// Find uses of `from` and replace them with `to`. Also notify the listener
   /// about every in-place op modification (for every use that was replaced).
-  void replaceAllUsesWith(Value from, Value to) {
+  virtual void replaceAllUsesWith(Value from, Value to) {
     for (OpOperand &operand : llvm::make_early_inc_range(from.getUses())) {
       Operation *op = operand.getOwner();
       modifyOpInPlace(op, [&]() { operand.set(to); });
@@ -664,20 +687,21 @@ public:
   /// Find uses of `from` and replace them with `to` if the `functor` returns
   /// true. Also notify the listener about every in-place op modification (for
   /// every use that was replaced). The optional `allUsesReplaced` flag is set
-  /// to "true" if all uses were replaced.
-  void replaceUsesWithIf(Value from, Value to,
-                         function_ref<bool(OpOperand &)> functor,
-                         bool *allUsesReplaced = nullptr);
-  void replaceUsesWithIf(ValueRange from, ValueRange to,
+  /// to "true" if all uses were replaced. Returns whether any uses were
+  /// replaced.
+  virtual bool replaceUsesWithIf(Value from, Value to,
+                                 function_ref<bool(OpOperand &)> functor,
+                                 bool *allUsesReplaced = nullptr);
+  bool replaceUsesWithIf(ValueRange from, ValueRange to,
                          function_ref<bool(OpOperand &)> functor,
                          bool *allUsesReplaced = nullptr);
   // Note: This function cannot be called `replaceOpUsesWithIf` because the
   // overload resolution, when called with an op that can be implicitly
   // converted to a Value, would be ambiguous.
-  void replaceOpUsesWithIf(Operation *from, ValueRange to,
+  bool replaceOpUsesWithIf(Operation *from, ValueRange to,
                            function_ref<bool(OpOperand &)> functor,
                            bool *allUsesReplaced = nullptr) {
-    replaceUsesWithIf(from->getResults(), to, functor, allUsesReplaced);
+    return replaceUsesWithIf(from->getResults(), to, functor, allUsesReplaced);
   }
 
   /// Find uses of `from` within `block` and replace them with `to`. Also notify
@@ -698,7 +722,7 @@ public:
   /// `exceptedUser`. Also notify the listener about every in-place op
   /// modification (for every use that was replaced).
   void replaceAllUsesExcept(Value from, Value to, Operation *exceptedUser) {
-    return replaceUsesWithIf(from, to, [&](OpOperand &use) {
+    replaceUsesWithIf(from, to, [&](OpOperand &use) {
       Operation *user = use.getOwner();
       return user != exceptedUser;
     });
@@ -843,11 +867,8 @@ public:
             typename... ConstructorArgs,
             typename = std::enable_if_t<sizeof...(Ts) != 0>>
   RewritePatternSet &add(ConstructorArg &&arg, ConstructorArgs &&...args) {
-    // The following expands a call to emplace_back for each of the pattern
-    // types 'Ts'.
-    (addImpl<Ts>(/*debugLabels=*/{}, std::forward<ConstructorArg>(arg),
-                 std::forward<ConstructorArgs>(args)...),
-     ...);
+    addImplForEach<Ts...>(/*debugLabels=*/{}, std::forward<ConstructorArg>(arg),
+                          std::forward<ConstructorArgs>(args)...);
     return *this;
   }
   /// An overload of the above `add` method that allows for attaching a set
@@ -860,9 +881,8 @@ public:
   RewritePatternSet &addWithLabel(ArrayRef<StringRef> debugLabels,
                                   ConstructorArg &&arg,
                                   ConstructorArgs &&...args) {
-    // The following expands a call to emplace_back for each of the pattern
-    // types 'Ts'.
-    (addImpl<Ts>(debugLabels, arg, args...), ...);
+    addImplForEach<Ts...>(debugLabels, std::forward<ConstructorArg>(arg),
+                          std::forward<ConstructorArgs>(args)...);
     return *this;
   }
 
@@ -926,9 +946,8 @@ public:
             typename... ConstructorArgs,
             typename = std::enable_if_t<sizeof...(Ts) != 0>>
   RewritePatternSet &insert(ConstructorArg &&arg, ConstructorArgs &&...args) {
-    // The following expands a call to emplace_back for each of the pattern
-    // types 'Ts'.
-    (addImpl<Ts>(/*debugLabels=*/{}, arg, args...), ...);
+    addImplForEach<Ts...>(/*debugLabels=*/{}, std::forward<ConstructorArg>(arg),
+                          std::forward<ConstructorArgs>(args)...);
     return *this;
   }
 
@@ -978,6 +997,22 @@ public:
   }
 
 private:
+  /// Add an instance of each pattern type. A single pattern receives perfectly
+  /// forwarded arguments. Multiple patterns receive lvalues so that a shared
+  /// rvalue argument is copied instead of moved from repeatedly.
+  template <typename... Ts, typename ConstructorArg,
+            typename... ConstructorArgs>
+  void addImplForEach(ArrayRef<StringRef> debugLabels, ConstructorArg &&arg,
+                      ConstructorArgs &&...args) {
+    if constexpr (sizeof...(Ts) == 1) {
+      (addImpl<Ts>(debugLabels, std::forward<ConstructorArg>(arg),
+                   std::forward<ConstructorArgs>(args)...),
+       ...);
+    } else {
+      (addImpl<Ts>(debugLabels, arg, args...), ...);
+    }
+  }
+
   /// Add an instance of the pattern type 'T'. Return a reference to `this` for
   /// chaining insertions.
   template <typename T, typename... Args>

@@ -229,8 +229,7 @@ define <vscale x 16 x i8> @addnve_i8_low(<vscale x 16 x i8> %a) {
 define <vscale x 8 x i16> @addnve_i16_low(<vscale x 8 x i16> %a) {
 ; CHECK-LABEL: addnve_i16_low:
 ; CHECK:       // %bb.0:
-; CHECK-NEXT:    mov z1.h, #-30 // =0xffffffffffffffe2
-; CHECK-NEXT:    add z0.h, z0.h, z1.h
+; CHECK-NEXT:    sub z0.h, z0.h, #30 // =0x1e
 ; CHECK-NEXT:    ret
   %res =  add <vscale x 8 x i16> %a, splat(i16 -30)
   ret <vscale x 8 x i16> %res
@@ -248,8 +247,7 @@ define <vscale x 8 x i16> @addnve_i16_high(<vscale x 8 x i16> %a) {
 define <vscale x 4 x i32> @addnve_i32_low(<vscale x 4 x i32> %a) {
 ; CHECK-LABEL: addnve_i32_low:
 ; CHECK:       // %bb.0:
-; CHECK-NEXT:    mov z1.s, #-30 // =0xffffffffffffffe2
-; CHECK-NEXT:    add z0.s, z0.s, z1.s
+; CHECK-NEXT:    sub z0.s, z0.s, #30 // =0x1e
 ; CHECK-NEXT:    ret
   %res = add <vscale x 4 x i32> %a, splat(i32 -30)
   ret <vscale x 4 x i32> %res
@@ -258,8 +256,7 @@ define <vscale x 4 x i32> @addnve_i32_low(<vscale x 4 x i32> %a) {
 define <vscale x 4 x i32> @addnve_i32_high(<vscale x 4 x i32> %a) {
 ; CHECK-LABEL: addnve_i32_high:
 ; CHECK:       // %bb.0:
-; CHECK-NEXT:    mov z1.s, #-1024 // =0xfffffffffffffc00
-; CHECK-NEXT:    add z0.s, z0.s, z1.s
+; CHECK-NEXT:    sub z0.s, z0.s, #1024 // =0x400
 ; CHECK-NEXT:    ret
   %res =  add <vscale x 4 x i32> %a, splat(i32 -1024)
   ret <vscale x 4 x i32> %res
@@ -268,8 +265,7 @@ define <vscale x 4 x i32> @addnve_i32_high(<vscale x 4 x i32> %a) {
 define <vscale x 2 x i64> @addnve_i64_low(<vscale x 2 x i64> %a) {
 ; CHECK-LABEL: addnve_i64_low:
 ; CHECK:       // %bb.0:
-; CHECK-NEXT:    mov z1.d, #-30 // =0xffffffffffffffe2
-; CHECK-NEXT:    add z0.d, z0.d, z1.d
+; CHECK-NEXT:    sub z0.d, z0.d, #30 // =0x1e
 ; CHECK-NEXT:    ret
   %res =  add <vscale x 2 x i64> %a, splat(i64 -30)
   ret <vscale x 2 x i64> %res
@@ -278,8 +274,7 @@ define <vscale x 2 x i64> @addnve_i64_low(<vscale x 2 x i64> %a) {
 define <vscale x 2 x i64> @addnve_i64_high(<vscale x 2 x i64> %a) {
 ; CHECK-LABEL: addnve_i64_high:
 ; CHECK:       // %bb.0:
-; CHECK-NEXT:    mov z1.d, #-1024 // =0xfffffffffffffc00
-; CHECK-NEXT:    add z0.d, z0.d, z1.d
+; CHECK-NEXT:    sub z0.d, z0.d, #1024 // =0x400
 ; CHECK-NEXT:    ret
   %res = add <vscale x 2 x i64> %a, splat(i64 -1024)
   ret <vscale x 2 x i64> %res
@@ -541,6 +536,17 @@ define <vscale x 2 x i64> @uqsub_i64_high(<vscale x 2 x i64> %a) {
   ret <vscale x 2 x i64> %res
 }
 
+define <vscale x 8 x i32> @uqsub_i32_from_splat(<vscale x 8 x i32> %a) {
+; CHECK-LABEL: uqsub_i32_from_splat:
+; CHECK:       // %bb.0:
+; CHECK-NEXT:    mov z2.s, #1 // =0x1
+; CHECK-NEXT:    uqsub z0.s, z2.s, z0.s
+; CHECK-NEXT:    uqsub z1.s, z2.s, z1.s
+; CHECK-NEXT:    ret
+  %res = call <vscale x 8 x i32> @llvm.usub.sat.nxv8i32(<vscale x 8 x i32> splat (i32 1), <vscale x 8 x i32> %a)
+  ret <vscale x 8 x i32> %res
+}
+
 declare <vscale x 16 x i8> @llvm.sadd.sat.nxv16i8(<vscale x 16 x i8>, <vscale x 16 x i8>)
 declare <vscale x 8 x i16> @llvm.sadd.sat.nxv8i16(<vscale x 8 x i16>, <vscale x 8 x i16>)
 declare <vscale x 4 x i32> @llvm.sadd.sat.nxv4i32(<vscale x 4 x i32>, <vscale x 4 x i32>)
@@ -556,4 +562,5 @@ declare <vscale x 2 x i64> @llvm.ssub.sat.nxv2i64(<vscale x 2 x i64>, <vscale x 
 declare <vscale x 16 x i8> @llvm.usub.sat.nxv16i8(<vscale x 16 x i8>, <vscale x 16 x i8>)
 declare <vscale x 8 x i16> @llvm.usub.sat.nxv8i16(<vscale x 8 x i16>, <vscale x 8 x i16>)
 declare <vscale x 4 x i32> @llvm.usub.sat.nxv4i32(<vscale x 4 x i32>, <vscale x 4 x i32>)
+declare <vscale x 8 x i32> @llvm.usub.sat.nxv8i32(<vscale x 8 x i32>, <vscale x 8 x i32>)
 declare <vscale x 2 x i64> @llvm.usub.sat.nxv2i64(<vscale x 2 x i64>, <vscale x 2 x i64>)

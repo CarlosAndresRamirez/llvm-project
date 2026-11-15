@@ -113,7 +113,7 @@ using Bar = Foo<X, sizeof(X)>; // expected-note {{candidate template ignored: co
                                // expected-note {{implicit deduction guide declared as 'template <typename X> requires __is_deducible(test9::Bar, test9::Foo<X, sizeof(X)>) Bar(test9::Foo<X, sizeof(X)>) -> test9::Foo<X, sizeof(X)>'}} \
                                // expected-note {{implicit deduction guide declared as 'template <typename X> requires __is_deducible(test9::Bar, test9::Foo<X, sizeof(X)>) Bar(const X (&)[sizeof(X)]) -> test9::Foo<X, sizeof(X)>'}} \
                                // expected-note {{candidate template ignored: constraints not satisfied [with X = int]}} \
-                               // expected-note {{cannot deduce template arguments for 'test9::Bar' from 'test9::Foo<int, 4UL>'}}
+                               // expected-note {{cannot deduce template arguments for 'test9::Bar' from 'test9::Foo<int, sizeof(int)>'}}
 
 
 Bar s = {{1}}; // expected-error {{no viable constructor or deduction guide }}
@@ -586,3 +586,80 @@ Baz a{};
 static_assert(__is_same(decltype(a), A<A<int>>));
 
 } // namespace GH133132
+
+namespace GH131408 {
+
+struct Node {};
+
+template <class T, Node>
+struct A {
+    A(T) {}
+};
+
+template <class T>
+using AA = A<T, {}>;
+
+AA a{0};
+
+static_assert(__is_same(decltype(a), A<int, Node{}>));
+}
+
+namespace GH130604 {
+template <typename T> struct A {
+    A(T);
+};
+
+template <typename T, template <typename> class TT = A> using Alias = TT<T>; // #gh130604-alias
+template <typename T> using Alias2 = Alias<T>;
+
+Alias2 a(42);
+// expected-error@-1 {{no viable constructor or deduction guide for deduction of template arguments of 'Alias2'}}
+Alias  b(42);
+// expected-error@-1 {{alias template 'Alias' requires template arguments; argument deduction only allowed for class templates or alias template}}
+// expected-note@#gh130604-alias {{template is declared here}}
+}
+
+namespace GH190517 {
+template <typename T> struct S1 {};
+template <typename T> using S2 = S1<char>;
+template <typename T> using S3 = S2<T>; // expected-note {{candidate function not viable}} \
+                                        // expected-note {{implicit deduction guide declared}} \
+                                        // expected-note {{candidate function not viable}} \
+                                        // expected-note {{implicit deduction guide declared}} \
+                                        // expected-note {{cannot deduce template arguments for 'GH190517::S3' from 'GH190517::S1<char>'}}
+S3 foo(42); // expected-error {{no viable constructor or deduction guide for deduction of template arguments of 'S3'}}
+}
+
+namespace post_GH147675 {
+
+template<class T> struct Foo { using self = Foo; Foo(T); };
+
+template<class> using Int = typename Foo<int>::self;
+
+template<class T> using Int2 = Foo<T>;
+
+template<class T> using Int3 = Foo<int>;
+
+template<class T> using A = Int<T>; // #post_GH147675_A
+
+template<class T> using B = Int2<T>; // #post_GH147675_B
+
+template<class T> using C = Int3<T>; // #post_GH147675_C
+
+A a = 1;
+// expected-error@-1 {{no viable constructor or deduction guide}}
+// expected-note@#post_GH147675_A 2{{candidate function}}
+// expected-note@#post_GH147675_A 2{{cannot deduce template arguments}}
+// expected-note@#post_GH147675_A 2{{implicit deduction guide}}
+
+B b = 1;
+static_assert(__is_same(decltype(b), Foo<int>));
+
+C c = 1;
+// expected-error@-1 {{no viable constructor or deduction guide}}
+// expected-note@#post_GH147675_C 2{{candidate function}}
+// expected-note@#post_GH147675_C 2{{cannot deduce template arguments}}
+// expected-note@#post_GH147675_C 2{{implicit deduction guide}}
+
+
+}

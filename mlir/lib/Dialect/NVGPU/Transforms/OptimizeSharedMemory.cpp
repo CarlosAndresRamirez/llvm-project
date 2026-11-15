@@ -145,6 +145,36 @@ getShmReadAndWriteOps(Operation *parentOp, Value shmMemRef,
   return success();
 }
 
+bool mlir::nvgpu::canSwizzleSharedMemoryType(MemRefType memRefType) {
+  // Not support 0D MemRefs.
+  if (memRefType.getRank() == 0)
+    return false;
+
+  // Only support memrefs with scalar element types (i.e., int or float).
+  // Memrefs with vector element types are not supported.
+  if (!memRefType.getElementType().isIntOrFloat())
+    return false;
+
+  // Check if this is necessary given the assumption of 128b accesses:
+  // If dim[rank-1] is small enough to fit 8 rows in a 128B line.
+  const int64_t rowSize = memRefType.getDimSize(memRefType.getRank() - 1);
+  if (ShapedType::isDynamic(rowSize) || rowSize == 0)
+    return false;
+
+  const int64_t rowsPerLine =
+      (8 * kSharedMemoryLineSizeBytes / memRefType.getElementTypeBitWidth()) /
+      rowSize;
+  const int64_t threadGroupSize =
+      1LL << (7 - llvm::Log2_64(kDefaultVectorSizeBits / 8));
+  if (rowsPerLine >= threadGroupSize)
+    return false;
+
+  // The XOR swizzle stays within a row only if the row size is a power of 2.
+  // Otherwise it moves some accesses into the next row, where they overwrite
+  // other elements.
+  return llvm::isPowerOf2_64(rowSize);
+}
+
 llvm::LogicalResult
 mlir::nvgpu::optimizeSharedMemoryReadsAndWrites(Operation *parentOp,
                                                 Value memrefValue) {
@@ -152,8 +182,7 @@ mlir::nvgpu::optimizeSharedMemoryReadsAndWrites(Operation *parentOp,
   if (!memRefType || !NVGPUDialect::hasSharedMemoryAddressSpace(memRefType))
     return failure();
 
-  // Not support 0D MemRefs.
-  if (memRefType.getRank() == 0)
+  if (!canSwizzleSharedMemoryType(memRefType))
     return failure();
 
   // Abort if the given value has any sub-views; we do not do any alias
@@ -161,17 +190,6 @@ mlir::nvgpu::optimizeSharedMemoryReadsAndWrites(Operation *parentOp,
   bool hasSubView = false;
   parentOp->walk([&](memref::SubViewOp subView) { hasSubView = true; });
   if (hasSubView)
-    return failure();
-
-  // Check if this is necessary given the assumption of 128b accesses:
-  // If dim[rank-1] is small enough to fit 8 rows in a 128B line.
-  const int64_t rowSize = memRefType.getDimSize(memRefType.getRank() - 1);
-  const int64_t rowsPerLine =
-      (8 * kSharedMemoryLineSizeBytes / memRefType.getElementTypeBitWidth()) /
-      rowSize;
-  const int64_t threadGroupSize =
-      1LL << (7 - llvm::Log2_64(kDefaultVectorSizeBits / 8));
-  if (rowsPerLine >= threadGroupSize)
     return failure();
 
   // Get sets of operations within the function that read/write to shared

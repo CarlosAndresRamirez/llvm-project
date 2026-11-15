@@ -159,7 +159,8 @@ public:
 
       // Some statements have custom mechanisms for dumping their children.
       if (isa<DeclStmt, GenericSelectionExpr, RequiresExpr,
-              OpenACCWaitConstruct, SYCLKernelCallStmt>(S))
+              OpenACCWaitConstruct, SYCLKernelCallStmt,
+              UnresolvedSYCLKernelCallStmt>(S))
         return;
 
       if (Traversal == TK_IgnoreUnlessSpelledInSource &&
@@ -447,6 +448,9 @@ public:
   void VisitBTFTagAttributedType(const BTFTagAttributedType *T) {
     Visit(T->getWrappedType());
   }
+  void VisitOverflowBehaviorType(const OverflowBehaviorType *T) {
+    Visit(T->getUnderlyingType());
+  }
   void VisitHLSLAttributedResourceType(const HLSLAttributedResourceType *T) {
     QualType Contained = T->getContainedType();
     if (!Contained.isNull())
@@ -521,7 +525,11 @@ public:
     Visit(TL.getSizeExpr());
   }
   void VisitDependentSizedExtVectorTypeLoc(DependentSizedExtVectorTypeLoc TL) {
-    Visit(cast<DependentSizedExtVectorType>(TL.getType())->getSizeExpr());
+    Visit(TL.getSizeExpr());
+  }
+  void VisitVectorTypeLoc(VectorTypeLoc TL) { Visit(TL.getSizeExpr()); }
+  void VisitDependentVectorTypeLoc(DependentVectorTypeLoc TL) {
+    Visit(TL.getSizeExpr());
   }
   void VisitTypeOfExprTypeLoc(TypeOfExprTypeLoc TL) {
     Visit(TL.getUnderlyingExpr());
@@ -530,11 +538,6 @@ public:
     Visit(TL.getUnderlyingExpr());
   }
   void VisitTemplateSpecializationTypeLoc(TemplateSpecializationTypeLoc TL) {
-    for (unsigned I=0, N=TL.getNumArgs(); I < N; ++I)
-      dumpTemplateArgumentLoc(TL.getArgLoc(I));
-  }
-  void VisitDependentTemplateSpecializationTypeLoc(
-      DependentTemplateSpecializationTypeLoc TL) {
     for (unsigned I=0, N=TL.getNumArgs(); I < N; ++I)
       dumpTemplateArgumentLoc(TL.getArgLoc(I));
   }
@@ -625,6 +628,11 @@ public:
       Visit(E);
   }
 
+  void VisitOMPGroupPrivateDecl(const OMPGroupPrivateDecl *D) {
+    for (const auto *E : D->varlist())
+      Visit(E);
+  }
+
   void VisitOMPDeclareReductionDecl(const OMPDeclareReductionDecl *D) {
     Visit(D->getCombiner());
     if (const auto *Initializer = D->getInitializer())
@@ -677,6 +685,17 @@ public:
   void VisitStaticAssertDecl(const StaticAssertDecl *D) {
     Visit(D->getAssertExpr());
     Visit(D->getMessage());
+  }
+
+  void VisitExplicitInstantiationDecl(const ExplicitInstantiationDecl *D) {
+    if (TypeSourceInfo *TSI = D->getTypeAsWritten())
+      Visit(TSI->getTypeLoc());
+    if (auto NumArgs = D->getNumTemplateArgs()) {
+      for (unsigned I = 0; I != *NumArgs; ++I) {
+        TemplateArgumentLoc Loc = D->getTemplateArg(I);
+        Visit(Loc.getArgument(), Loc.getSourceRange());
+      }
+    }
   }
 
   void VisitFunctionTemplateDecl(const FunctionTemplateDecl *D) {
@@ -770,10 +789,18 @@ public:
       // it will not be in the parent context:
       if (auto *TT = D->getFriendType()->getType()->getAs<TagType>())
         if (TT->isTagOwned())
-          Visit(TT->getOriginalDecl());
+          Visit(TT->getDecl());
     } else {
       Visit(D->getFriendDecl());
     }
+  }
+
+  void VisitFriendTemplateDecl(const FriendTemplateDecl *D) {
+    for (const TemplateParameterList *TPL : D->getTemplateParameterLists())
+      dumpTemplateParameters(TPL);
+    if (D->getFriendKind() !=
+        FriendTemplateDecl::FriendTemplateEntityKind::Template)
+      VisitFriendDecl(D);
   }
 
   void VisitObjCMethodDecl(const ObjCMethodDecl *D) {
@@ -783,8 +810,8 @@ public:
       for (const ParmVarDecl *Parameter : D->parameters())
         Visit(Parameter);
 
-    if (D->hasBody())
-      Visit(D->getBody());
+    if (Stmt *Body = D->getBody())
+      Visit(Body);
   }
 
   void VisitObjCCategoryDecl(const ObjCCategoryDecl *D) {
@@ -836,8 +863,17 @@ public:
 
   void VisitSYCLKernelCallStmt(const SYCLKernelCallStmt *Node) {
     Visit(Node->getOriginalStmt());
-    if (Traversal != TK_IgnoreUnlessSpelledInSource)
+    if (Traversal != TK_IgnoreUnlessSpelledInSource) {
+      Visit(Node->getKernelLaunchStmt());
       Visit(Node->getOutlinedFunctionDecl());
+    }
+  }
+
+  void
+  VisitUnresolvedSYCLKernelCallStmt(const UnresolvedSYCLKernelCallStmt *Node) {
+    Visit(Node->getOriginalStmt());
+    if (Traversal != TK_IgnoreUnlessSpelledInSource)
+      Visit(Node->getKernelLaunchIdExpr());
   }
 
   void VisitOMPExecutableDirective(const OMPExecutableDirective *Node) {
@@ -957,6 +993,12 @@ public:
       Visit(Node->getRangeInit());
       Visit(Node->getBody());
     }
+  }
+
+  void VisitCXXExpansionStmtDecl(const CXXExpansionStmtDecl *Node) {
+    Visit(Node->getExpansionPattern());
+    if (Traversal != TK_IgnoreUnlessSpelledInSource)
+      Visit(Node->getInstantiations());
   }
 
   void VisitCallExpr(const CallExpr *Node) {

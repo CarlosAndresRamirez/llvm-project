@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Utils/DeclareRuntimeLibcalls.h"
+#include "llvm/Analysis/RuntimeLibcallInfo.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/RuntimeLibcalls.h"
 
@@ -18,20 +19,17 @@ using namespace llvm;
 
 PreservedAnalyses DeclareRuntimeLibcallsPass::run(Module &M,
                                                   ModuleAnalysisManager &MAM) {
-  RTLIB::RuntimeLibcallsInfo RTLCI(M.getTargetTriple());
-  LLVMContext &Ctx = M.getContext();
+  const RTLIB::RuntimeLibcallsInfo &RTLCI =
+      MAM.getResult<RuntimeLibraryAnalysis>(M);
 
-  for (RTLIB::LibcallImpl Impl : RTLCI.getLibcallImpls()) {
-    if (Impl == RTLIB::Unsupported)
+  for (RTLIB::LibcallImpl Impl : RTLIB::libcall_impls()) {
+    if (!RTLCI.isAvailable(Impl))
       continue;
 
-    // TODO: Declare with correct type, calling convention, and attributes.
-
-    FunctionType *FuncTy =
-        FunctionType::get(Type::getVoidTy(Ctx), {}, /*IsVarArgs=*/true);
-
-    StringRef FuncName = RTLCI.getLibcallImplName(Impl);
-    M.getOrInsertFunction(FuncName, FuncTy);
+    if (RTLIB::RuntimeLibcallsInfo::isVariable(Impl))
+      RTLCI.getOrInsertImplGlobal(M, Impl);
+    else
+      RTLCI.getOrInsertLibcallDecl(M, Impl);
   }
 
   return PreservedAnalyses::none();

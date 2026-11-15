@@ -25,8 +25,8 @@ typedef enum kmp_interop_type_t {
 } kmp_interop_type_t;
 
 struct interop_attrs_t {
-  bool inorder : 1;
-  int reserved : 31;
+  uint32_t inorder : 1;
+  uint32_t reserved : 31;
 
   /// Check if the supported attributes are compatible with the current
   ///   attributes. Only if an attribute is supported can the value be true,
@@ -43,16 +43,19 @@ struct interop_spec_t {
                       // plugin)
 };
 
+/// Specification meaning "no interop supported".
+inline constexpr interop_spec_t NoInteropSpec{omp_ifr_none, {true, 0}, 0};
+
 struct interop_flags_t {
-  bool implicit : 1; // dispatch (true) or interop (false)
-  bool nowait : 1;   // has nowait flag
-  int reserved : 30;
+  uint32_t implicit : 1; // dispatch (true) or interop (false)
+  uint32_t nowait : 1;   // has nowait flag
+  uint32_t reserved : 30;
 };
 
 struct interop_ctx_t {
   uint32_t version; // version of the interface (current is 0)
   interop_flags_t flags;
-  int gtid;
+  int32_t gtid;
 };
 
 struct dep_pack_t {
@@ -82,19 +85,23 @@ typedef struct omp_interop_val_t {
   omp_interop_val_t(intptr_t device_id, kmp_interop_type_t interop_type)
       : interop_type(interop_type), device_id(device_id) {}
   const char *err_str = nullptr;
-  __tgt_async_info *async_info = nullptr;
-  __tgt_device_info device_info;
+  /// Queue backing a targetsync interop.
+  ol_queue_handle_t queue = nullptr;
+  /// Backend-native handles.
+  void *native_queue = nullptr;
+  void *native_device = nullptr;
+  void *native_platform = nullptr;
+  void *native_context = nullptr;
   const kmp_interop_type_t interop_type;
   const intptr_t device_id;
   omp_vendor_id_t vendor_id = omp_vendor_llvm;
-  tgt_foreign_runtime_id_t fr_id = tgt_fr_none;
+  omp_foreign_runtime_id_t fr_id = omp_ifr_none;
   interop_attrs_t attrs{false, 0}; // Common prefer specification attributes
   int64_t impl_attrs = 0; // Implementation prefer specification attributes
 
   // Constants
   static constexpr int no_owner = -1; // This interop has no current owner
 
-  void *rtl_property = nullptr; // Plugin dependent information
   // For implicitly created Interop objects (e.g., from a dispatch construct)
   // who owns the object
   int owner_gtid = no_owner;
@@ -111,8 +118,6 @@ typedef struct omp_interop_val_t {
     clearCompletionCbs();
   }
 
-  llvm::Expected<DeviceTy &> getDevice() const;
-
   bool hasOwner() const { return owner_gtid != no_owner; }
 
   void setOwner(int gtid) { owner_gtid = gtid; }
@@ -124,10 +129,8 @@ typedef struct omp_interop_val_t {
   void markDirty() { clean = false; }
   bool isClean() const { return clean; }
 
-  int32_t flush(DeviceTy &Device);
-  int32_t sync_barrier(DeviceTy &Device);
-  int32_t async_barrier(DeviceTy &Device);
-  int32_t release(DeviceTy &Device);
+  int32_t sync_barrier();
+  int32_t release();
 
   void addCompletionCb(ompx_interop_cb_t *cb, void *data) {
     completion_cbs.push_back(omp_interop_cb_instance_t(cb, data));
@@ -160,17 +163,11 @@ struct InteropTableEntry {
     Interops.push_back(obj);
   }
 
-  template <class ClearFuncTy> void clear(ClearFuncTy f) {
-    for (auto &Obj : Interops) {
-      f(Obj);
-    }
-  }
-
   /// vector interface
   int size() const { return Interops.size(); }
   iterator begin() { return Interops.begin(); }
   iterator end() { return Interops.end(); }
-  iterator erase(iterator it) { return Interops.erase(it); }
+  void clear() { Interops.clear(); }
 };
 
 struct InteropTblTy

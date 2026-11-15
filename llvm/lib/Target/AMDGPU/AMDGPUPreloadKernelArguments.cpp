@@ -33,15 +33,6 @@
 
 using namespace llvm;
 
-static cl::opt<unsigned> KernargPreloadCount(
-    "amdgpu-kernarg-preload-count",
-    cl::desc("How many kernel arguments to preload onto SGPRs"), cl::init(0));
-
-static cl::opt<bool>
-    EnableKernargPreload("amdgpu-kernarg-preload",
-                         cl::desc("Enable preload kernel arguments to SGPRs"),
-                         cl::init(true));
-
 namespace {
 
 class AMDGPUPreloadKernelArgumentsLegacy : public ModulePass {
@@ -127,7 +118,7 @@ private:
   // will also be preloaded even if that data is unused.
   Function *cloneFunctionWithPreloadImplicitArgs(unsigned LastPreloadIndex) {
     FunctionType *FT = F.getFunctionType();
-    LLVMContext &Ctx = F.getParent()->getContext();
+    LLVMContext &Ctx = F.getContext();
     SmallVector<Type *, 16> FTypes(FT->param_begin(), FT->param_end());
     for (unsigned I = 0; I <= LastPreloadIndex; ++I)
       FTypes.push_back(getHiddenArgType(Ctx, HiddenArg(I)));
@@ -191,19 +182,20 @@ public:
     if (!ImplicitArgPtr)
       return;
 
-    const DataLayout &DL = F.getParent()->getDataLayout();
+    const DataLayout &DL = F.getDataLayout();
     // Pair is the load and the load offset.
     SmallVector<std::pair<LoadInst *, unsigned>, 4> ImplicitArgLoads;
     for (auto *U : ImplicitArgPtr->users()) {
       Instruction *CI = dyn_cast<Instruction>(U);
-      if (!CI || CI->getParent()->getParent() != &F)
+      if (!CI || CI->getFunction() != &F)
         continue;
 
       for (auto *U : CI->users()) {
         int64_t Offset = 0;
         auto *Load = dyn_cast<LoadInst>(U); // Load from ImplicitArgPtr?
         if (!Load) {
-          if (GetPointerBaseWithConstantOffset(U, Offset, DL) != CI)
+          if (U->user_empty() ||
+              GetPointerBaseWithConstantOffset(U, Offset, DL) != CI)
             continue;
 
           Load = dyn_cast<LoadInst>(*U->user_begin()); // Load from GEP?
@@ -213,7 +205,7 @@ public:
           continue;
 
         // FIXME: Expand handle merged loads.
-        LLVMContext &Ctx = F.getParent()->getContext();
+        LLVMContext &Ctx = F.getContext();
         Type *LoadTy = Load->getType();
         HiddenArg HA = getHiddenArgFromOffset(Offset);
         if (HA == END_HIDDEN_ARGS || LoadTy != getHiddenArgType(Ctx, HA))
@@ -280,7 +272,9 @@ AMDGPUPreloadKernelArgumentsLegacy::AMDGPUPreloadKernelArgumentsLegacy(
     : ModulePass(ID), TM(TM) {}
 
 static bool markKernelArgsAsInreg(Module &M, const TargetMachine &TM) {
-  if (!EnableKernargPreload)
+  const AMDGPUOptions &CLOpts =
+      static_cast<const AMDGPUTargetMachine &>(TM).getCLOpts();
+  if (!CLOpts.kernarg_preload)
     return false;
 
   SmallVector<Function *, 4> FunctionsToErase;
@@ -295,7 +289,7 @@ static bool markKernelArgsAsInreg(Module &M, const TargetMachine &TM) {
     uint64_t ExplicitArgOffset = 0;
     const DataLayout &DL = F.getDataLayout();
     const uint64_t BaseOffset = ST.getExplicitKernelArgOffset();
-    unsigned NumPreloadsRequested = KernargPreloadCount;
+    unsigned NumPreloadsRequested = CLOpts.kernarg_preload_count;
     unsigned NumPreloadedExplicitArgs = 0;
     for (Argument &Arg : F.args()) {
       // Avoid incompatible attributes and guard against running this pass

@@ -31,15 +31,16 @@
 #include <cstring>
 #include <tuple>
 
-#ifdef HAVE_CRASHREPORTERCLIENT_H
+#if __has_include(<CrashReporterClient.h>)
 #include <CrashReporterClient.h>
+#define LLVM_HAVE_CRASHREPORTERCLIENT_H
 #endif
 
 using namespace llvm;
 
 static const char *BugReportMsg =
     "PLEASE submit a bug report to " BUG_REPORT_URL
-    " and include the crash backtrace.\n";
+    " and include the crash backtrace and instructions to reproduce the bug.\n";
 
 // If backtrace support is not enabled, compile out support for pretty stack
 // traces.  This has the secondary effect of not requiring thread local storage
@@ -110,7 +111,7 @@ static void PrintCurStackTrace(raw_ostream &OS) {
 }
 
 // Integrate with crash reporter libraries.
-#if defined (__APPLE__) && defined(HAVE_CRASHREPORTERCLIENT_H)
+#if defined(__APPLE__) && defined(LLVM_HAVE_CRASHREPORTERCLIENT_H)
 //  If any clients of llvm try to link to libCrashReporterClient.a themselves,
 //  only one crash info struct will be used.
 extern "C" {
@@ -141,9 +142,9 @@ extern "C" const char *__crashreporter_info__
 asm(".desc ___crashreporter_info__, 0x10");
 #endif
 
-static void setCrashLogMessage(const char *msg) LLVM_ATTRIBUTE_UNUSED;
+[[maybe_unused]] static void setCrashLogMessage(const char *msg);
 static void setCrashLogMessage(const char *msg) {
-#ifdef HAVE_CRASHREPORTERCLIENT_H
+#ifdef LLVM_HAVE_CRASHREPORTERCLIENT_H
   (void)CRSetCrashLogMessage(msg);
 #elif HAVE_CRASHREPORTER_INFO
   __crashreporter_info__ = msg;

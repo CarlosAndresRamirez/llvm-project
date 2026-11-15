@@ -1,4 +1,5 @@
 # RUN: llc -o - -mtriple=x86_64-- -run-pass=x86-cf-opt %s | FileCheck %s
+# RUN: llc -o - -mtriple=x86_64-- -passes=x86-cf-opt %s | FileCheck %s
 
 --- |
   ; ModuleID = 'test.ll'
@@ -37,7 +38,6 @@ legalized:       false
 regBankSelected: false
 selected:        false
 failedISel:      false
-tracksRegLiveness: true
 hasWinCFI:       false
 registers:
   - { id: 0, class: gr64, preferred-register: '' }

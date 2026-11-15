@@ -142,37 +142,12 @@ void BufferViewFlowAnalysis::build(Operation *op) {
     }
 
     if (auto regionInterface = dyn_cast<RegionBranchOpInterface>(op)) {
-      // Query the RegionBranchOpInterface to find potential successor regions.
-      // Extract all entry regions and wire all initial entry successor inputs.
-      SmallVector<RegionSuccessor, 2> entrySuccessors;
-      regionInterface.getSuccessorRegions(/*point=*/RegionBranchPoint::parent(),
-                                          entrySuccessors);
-      for (RegionSuccessor &entrySuccessor : entrySuccessors) {
-        // Wire the entry region's successor arguments with the initial
-        // successor inputs.
-        registerDependencies(
-            regionInterface.getEntrySuccessorOperands(entrySuccessor),
-            entrySuccessor.getSuccessorInputs());
-      }
-
-      // Wire flow between regions and from region exits.
-      for (Region &region : regionInterface->getRegions()) {
-        // Iterate over all successor region entries that are reachable from the
-        // current region.
-        SmallVector<RegionSuccessor, 2> successorRegions;
-        regionInterface.getSuccessorRegions(region, successorRegions);
-        for (RegionSuccessor &successorRegion : successorRegions) {
-          // Iterate over all immediate terminator operations and wire the
-          // successor inputs with the successor operands of each terminator.
-          for (Block &block : region)
-            if (auto terminator = dyn_cast<RegionBranchTerminatorOpInterface>(
-                    block.getTerminator()))
-              registerDependencies(
-                  terminator.getSuccessorOperands(successorRegion),
-                  successorRegion.getSuccessorInputs());
-        }
-      }
-
+      // Wire the successor operands with the successor inputs.
+      DenseMap<OpOperand *, SmallVector<Value>> mapping;
+      regionInterface.getSuccessorOperandInputMapping(mapping);
+      for (const auto &[operand, inputs] : mapping)
+        for (Value input : inputs)
+          registerDependencies({operand->get()}, {input});
       return WalkResult::advance();
     }
 
@@ -182,13 +157,16 @@ void BufferViewFlowAnalysis::build(Operation *op) {
 
     if (isa<CallOpInterface>(op)) {
       // This is an intra-function analysis. We have no information about other
-      // functions. Conservatively assume that each operand may alias with each
-      // result. Also mark the results are terminals because the function could
+      // functions. Conservatively assume that each memref operand may alias
+      // with each memref result; a value of any other type is not a view of a
+      // buffer. Also mark the results are terminals because the function could
       // return newly allocated buffers.
       populateTerminalValues(op);
       for (Value operand : op->getOperands())
         for (Value result : op->getResults())
-          registerDependencies({operand}, {result});
+          if (isa<BaseMemRefType>(operand.getType()) &&
+              isa<BaseMemRefType>(result.getType()))
+            registerDependencies({operand}, {result});
       return WalkResult::advance();
     }
 

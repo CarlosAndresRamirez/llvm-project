@@ -306,7 +306,9 @@ static const uint8_t tailMergeARM[] = {
     0x61, 0x46,             // mov     r1, ip
     0x40, 0xf2, 0x00, 0x00, // mov.w   r0, #0 DELAY_IMPORT_DESCRIPTOR
     0xc0, 0xf2, 0x00, 0x00, // mov.t   r0, #0 DELAY_IMPORT_DESCRIPTOR
-    0x00, 0xf0, 0x00, 0xd0, // bl      #0 __delayLoadHelper2
+    0x40, 0xf2, 0x00, 0x02, // mov.w   r2, #0 __delayLoadHelper2
+    0xc0, 0xf2, 0x00, 0x02, // mov.t   r2, #0 __delayLoadHelper2
+    0x90, 0x47,             // blx     r2
     0x84, 0x46,             // mov     ip, r0
     0xbd, 0xec, 0x10, 0x0b, // vpop    {d0, d1, d2, d3, d4, d5, d6, d7}
     0xbd, 0xe8, 0x0f, 0x48, // pop.w   {r0, r1, r2, r3, r11, lr}
@@ -320,30 +322,34 @@ static const uint8_t thunkARM64[] = {
 };
 
 static const uint8_t tailMergeARM64[] = {
-    0xfd, 0x7b, 0xb3, 0xa9, // stp     x29, x30, [sp, #-208]!
+    0xfd, 0x7b, 0xb2, 0xa9, // stp     x29, x30, [sp, #-224]!
     0xfd, 0x03, 0x00, 0x91, // mov     x29, sp
     0xe0, 0x07, 0x01, 0xa9, // stp     x0, x1, [sp, #16]
     0xe2, 0x0f, 0x02, 0xa9, // stp     x2, x3, [sp, #32]
     0xe4, 0x17, 0x03, 0xa9, // stp     x4, x5, [sp, #48]
     0xe6, 0x1f, 0x04, 0xa9, // stp     x6, x7, [sp, #64]
-    0xe0, 0x87, 0x02, 0xad, // stp     q0, q1, [sp, #80]
-    0xe2, 0x8f, 0x03, 0xad, // stp     q2, q3, [sp, #112]
-    0xe4, 0x97, 0x04, 0xad, // stp     q4, q5, [sp, #144]
-    0xe6, 0x9f, 0x05, 0xad, // stp     q6, q7, [sp, #176]
+    0xe8, 0x2b, 0x00, 0xf9, // str     x8,     [sp, #80]
+    0xe0, 0x07, 0x03, 0xad, // stp     q0, q1, [sp, #96]
+    0xe2, 0x0f, 0x04, 0xad, // stp     q2, q3, [sp, #128]
+    0xe4, 0x17, 0x05, 0xad, // stp     q4, q5, [sp, #160]
+    0xe6, 0x1f, 0x06, 0xad, // stp     q6, q7, [sp, #192]
     0xe1, 0x03, 0x11, 0xaa, // mov     x1, x17
     0x00, 0x00, 0x00, 0x90, // adrp    x0, #0     DELAY_IMPORT_DESCRIPTOR
     0x00, 0x00, 0x00, 0x91, // add     x0, x0, #0 :lo12:DELAY_IMPORT_DESCRIPTOR
-    0x00, 0x00, 0x00, 0x94, // bl      #0 __delayLoadHelper2
+    0x02, 0x00, 0x00, 0x90, // adrp    x2, #0     __delayLoadHelper2
+    0x42, 0x00, 0x00, 0x91, // add     x2, x2, #0 :lo12:__delayLoadHelper2
+    0x40, 0x00, 0x3f, 0xd6, // blr     x2
     0xf0, 0x03, 0x00, 0xaa, // mov     x16, x0
-    0xe6, 0x9f, 0x45, 0xad, // ldp     q6, q7, [sp, #176]
-    0xe4, 0x97, 0x44, 0xad, // ldp     q4, q5, [sp, #144]
-    0xe2, 0x8f, 0x43, 0xad, // ldp     q2, q3, [sp, #112]
-    0xe0, 0x87, 0x42, 0xad, // ldp     q0, q1, [sp, #80]
+    0xe6, 0x1f, 0x46, 0xad, // ldp     q6, q7, [sp, #192]
+    0xe4, 0x17, 0x45, 0xad, // ldp     q4, q5, [sp, #160]
+    0xe2, 0x0f, 0x44, 0xad, // ldp     q2, q3, [sp, #128]
+    0xe0, 0x07, 0x43, 0xad, // ldp     q0, q1, [sp, #96]
+    0xe8, 0x2b, 0x40, 0xf9, // ldr     x8,     [sp, #80]
     0xe6, 0x1f, 0x44, 0xa9, // ldp     x6, x7, [sp, #64]
     0xe4, 0x17, 0x43, 0xa9, // ldp     x4, x5, [sp, #48]
     0xe2, 0x0f, 0x42, 0xa9, // ldp     x2, x3, [sp, #32]
     0xe0, 0x07, 0x41, 0xa9, // ldp     x0, x1, [sp, #16]
-    0xfd, 0x7b, 0xcd, 0xa8, // ldp     x29, x30, [sp], #208
+    0xfd, 0x7b, 0xce, 0xa8, // ldp     x29, x30, [sp], #224
     0x00, 0x02, 0x1f, 0xd6, // br      x16
 };
 
@@ -509,11 +515,13 @@ public:
   void writeTo(uint8_t *buf) const override {
     memcpy(buf, tailMergeARM, sizeof(tailMergeARM));
     applyMOV32T(buf + 14, desc->getRVA() + ctx.config.imageBase);
-    applyBranch24T(buf + 22, helper->getRVA() - rva - 26);
+    // The helper can be more than 16 MiB away, out of reach of a bl.
+    applyMOV32T(buf + 22, (helper->getRVA() + ctx.config.imageBase) | 1);
   }
 
   void getBaserels(std::vector<Baserel> *res) override {
     res->emplace_back(rva + 14, IMAGE_REL_BASED_ARM_MOV32T);
+    res->emplace_back(rva + 22, IMAGE_REL_BASED_ARM_MOV32T);
   }
 
   Chunk *desc = nullptr;
@@ -554,10 +562,12 @@ public:
 
   void writeTo(uint8_t *buf) const override {
     memcpy(buf, tailMergeARM64, sizeof(tailMergeARM64));
-    applyArm64Addr(buf + 44, desc->getRVA(), rva + 44, 12);
-    applyArm64Imm(buf + 48, desc->getRVA() & 0xfff, 0);
-    if (helper)
-      applyArm64Branch26(buf + 52, helper->getRVA() - rva - 52);
+    applyArm64Addr(buf + 48, desc->getRVA(), rva + 48, 12);
+    applyArm64Imm(buf + 52, desc->getRVA() & 0xfff, 0);
+    if (helper) {
+      applyArm64Addr(buf + 56, helper->getRVA(), rva + 56, 12);
+      applyArm64Imm(buf + 60, helper->getRVA() & 0xfff, 0);
+    }
   }
 
   Chunk *desc = nullptr;

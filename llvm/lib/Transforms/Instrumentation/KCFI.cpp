@@ -92,6 +92,7 @@ PreservedAnalyses KCFIPass::run(Function &F, FunctionAnalysisManager &AM) {
 
     // Emit a check and trap if the target hash doesn't match.
     IRBuilder<> Builder(Call);
+    Builder.disableGEPCanonicalization();
     Value *FuncPtr = Call->getCalledOperand();
     // ARM uses the least significant bit of the function pointer to select
     // between ARM and Thumb modes for the callee. Instructions are always
@@ -100,7 +101,7 @@ PreservedAnalyses KCFIPass::run(Function &F, FunctionAnalysisManager &AM) {
     if (T.isARM() || T.isThumb()) {
       FuncPtr = Builder.CreateIntToPtr(
           Builder.CreateAnd(Builder.CreatePtrToInt(FuncPtr, Int32Ty),
-                            ConstantInt::get(Int32Ty, -2)),
+                            ConstantInt::getSigned(Int32Ty, -2)),
           FuncPtr->getType());
     }
     Value *HashPtr = Builder.CreateConstInBoundsGEP1_32(Int32Ty, FuncPtr, -1);

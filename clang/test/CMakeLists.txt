@@ -12,8 +12,8 @@ llvm_canonicalize_cmake_booleans(
   CLANG_ENABLE_CIR
   CLANG_ENABLE_OBJC_REWRITER
   CLANG_LINK_CLANG_DYLIB
+  CLANG_USE_XCSELECT
   ENABLE_BACKTRACES
-  LLVM_BUILD_EXAMPLES
   LLVM_BYE_LINK_INTO_TOOLS
   LLVM_ENABLE_PLUGINS
   LLVM_ENABLE_ZLIB
@@ -21,6 +21,7 @@ llvm_canonicalize_cmake_booleans(
   LLVM_ENABLE_PER_TARGET_RUNTIME_DIR
   LLVM_ENABLE_THREADS
   LLVM_ENABLE_REVERSE_ITERATION
+  LLVM_INCLUDE_EXAMPLES
   LLVM_LINK_LLVM_DYLIB
   LLVM_WITH_Z3
   PPC_LINUX_DEFAULT_IEEELONGDOUBLE
@@ -92,7 +93,7 @@ list(APPEND CLANG_TEST_DEPS
   clang
   clang-fuzzer-dictionary
   clang-resource-headers
-  clang-format
+  clang-format-check-format
   clang-tblgen
   clang-offload-bundler
   clang-import-test
@@ -103,7 +104,10 @@ list(APPEND CLANG_TEST_DEPS
   clang-linker-wrapper
   clang-nvlink-wrapper
   clang-offload-bundler
-  clang-offload-packager
+  clang-ssaf-analyzer
+  clang-ssaf-format
+  clang-ssaf-linker
+  clang-ssaf-src-edit-merge
   clang-sycl-linker
   diagtool
   hmaptool
@@ -113,8 +117,12 @@ if(CLANG_ENABLE_CIR)
   list(APPEND CLANG_TEST_DEPS
     cir-opt
     cir-translate
-    mlir-translate
+    llvm-strings
     )
+  if(NOT CLANG_BUILT_STANDALONE)
+    list(APPEND CLANG_TEST_DEPS llvm-strings)
+  endif()
+  add_subdirectory(CIR/lib)
 endif()
 
 if(CLANG_ENABLE_STATIC_ANALYZER)
@@ -134,6 +142,12 @@ if(CLANG_BUILD_EXAMPLES AND CLANG_PLUGIN_SUPPORT)
     LLVMPrintFunctionNames
     )
 endif ()
+
+if(LLVM_INCLUDE_EXAMPLES AND NOT WIN32 AND NOT CYGWIN)
+  list(APPEND CLANG_TEST_DEPS
+    Bye
+    )
+endif()
 
 if(LLVM_INCLUDE_SPIRV_TOOLS_TESTS)
   list(APPEND CLANG_TEST_DEPS
@@ -173,11 +187,16 @@ if( NOT CLANG_BUILT_STANDALONE )
     llvm-strip
     llvm-symbolizer
     llvm-windres
+    llvm-offload-binary
     obj2yaml
     opt
     split-file
     yaml2obj
     )
+
+  if(TARGET lld)
+    list(APPEND CLANG_TEST_DEPS lld)
+  endif()
 
   if(TARGET llvm-lto)
     list(APPEND CLANG_TEST_DEPS llvm-lto)
@@ -194,6 +213,14 @@ if(CLANG_ENABLE_STATIC_ANALYZER)
   endif()
 endif()
 
+if(CLANG_PLUGIN_SUPPORT AND LLVM_ENABLE_PLUGINS AND NOT WIN32)
+  list(APPEND CLANG_TEST_DEPS
+    SSAFExamplePlugin
+    SSAFTestTransformationPlugin
+    )
+  add_subdirectory(Analysis/Scalable/source-edit-generation/Plugins)
+endif()
+
 if (HAVE_CLANG_REPL_SUPPORT)
   list(APPEND CLANG_TEST_DEPS
     clang-repl
@@ -208,17 +235,76 @@ configure_file(AST/gen_ast_dump_json_test.py
 add_custom_target(clang-test-depends DEPENDS ${CLANG_TEST_DEPS})
 set_target_properties(clang-test-depends PROPERTIES FOLDER "Clang/Tests")
 
-add_lit_testsuite(check-clang "Running the Clang regression tests"
+add_lit_testsuite(check-clang "Running the Clang regression and unit tests"
   ${CMAKE_CURRENT_BINARY_DIR}
   #LIT ${LLVM_LIT}
   DEPENDS ${CLANG_TEST_DEPS}
   ARGS ${CLANG_TEST_EXTRA_ARGS}
   )
 
+# Skip CIR and Unit/CIR so that check-clang-cir and check-clang-cir-unit can
+# be independently added as build targets with a subset of dependencies. This
+# allows CIR testing to be run, for example, as part of MLIR CI testing without
+# building the complete set of dependencies needed by check-clang.
+#
+# check-clang still discovers the CIR regression tests, and the Clang-Unit suite
+# runs CIRUnitTests with the other unit tests. check-clang-cir runs both, and
+# its dependencies are limited to the tools those tests invoke.
 add_lit_testsuites(CLANG ${CMAKE_CURRENT_SOURCE_DIR}
   DEPENDS ${CLANG_TEST_DEPS}
   FOLDER "Clang tests/Suites"
+  SKIP "^CIR" "^Unit/CIR"
 )
+
+if(CLANG_ENABLE_CIR)
+  configure_lit_site_cfg(
+    ${CMAKE_CURRENT_SOURCE_DIR}/Unit/CIR/lit.site.cfg.py.in
+    ${CMAKE_CURRENT_BINARY_DIR}/Unit/CIR/lit.site.cfg.py
+    MAIN_CONFIG
+    ${CMAKE_CURRENT_SOURCE_DIR}/Unit/CIR/lit.cfg.py
+    PATHS
+    "LLVM_SOURCE_DIR"
+    "LLVM_BINARY_DIR"
+    "LLVM_TOOLS_DIR"
+    "LLVM_LIBS_DIR"
+    "CLANG_BINARY_DIR"
+    "SHLIBDIR"
+    )
+
+  # These tools are resolved while loading clang/test/lit.cfg.py, or invoked
+  # directly by tests under clang/test/CIR.
+  set(CLANG_CIR_TEST_DEPS
+    clang
+    cir-opt
+    cir-translate
+    )
+  if(NOT CLANG_BUILT_STANDALONE)
+    list(APPEND CLANG_CIR_TEST_DEPS
+      FileCheck
+      count
+      llvm-config
+      llvm-dis
+      llvm-objdump
+      llvm-readelf
+      llvm-strings
+      not
+      opt
+      split-file
+      )
+  endif()
+
+  add_lit_target(check-clang-cir "Running the CIR regression tests"
+    ${CMAKE_CURRENT_SOURCE_DIR}/CIR
+    ${CMAKE_CURRENT_SOURCE_DIR}/Unit/CIR
+    DEPENDS ${CLANG_CIR_TEST_DEPS} CIRUnitTests
+    )
+  set_target_properties(check-clang-cir PROPERTIES FOLDER "Clang tests/Suites")
+
+  add_lit_testsuites(CLANG-CIR ${CMAKE_CURRENT_SOURCE_DIR}/CIR
+    DEPENDS ${CLANG_CIR_TEST_DEPS}
+    FOLDER "Clang tests/Suites"
+    )
+endif()
 
 # Add a legacy target spelling: clang-test
 add_custom_target(clang-test)

@@ -6,8 +6,6 @@ struct CompositeOfScalars {
   short J;
   char C;
   double D;
-  _Complex float CF;
-  _Complex double CD;
 };
 
 struct CompositeHasComposite {
@@ -16,8 +14,6 @@ struct CompositeHasComposite {
   short J;
   char C;
   double D;
-  _Complex float CF;
-  _Complex double CD;
   struct CompositeOfScalars COS; // #COS_FIELD
 };
 void uses() {
@@ -157,19 +153,17 @@ void uses() {
 
   CompositeHasComposite CoCArr[5];
   // expected-error@+4{{invalid type 'struct CompositeOfScalars' used in OpenACC 'reduction' variable reference; type is not a scalar value}}
-  // expected-note@+3{{used as element type of array type 'CompositeHasComposite'}}
+  // expected-note@+3{{used as element type of array type 'CompositeHasComposite[5]'}}
   // expected-note@#COS_FIELD{{used as field 'COS' of composite 'CompositeHasComposite'}}
   // expected-note@+1{{OpenACC 'reduction' variable reference must be a scalar variable or a composite of scalars, or an array, sub-array, or element of scalar types}}
 #pragma acc loop reduction(+:CoCArr)
     for(int i = 0; i < 5; ++i);
-  // expected-error@+4{{invalid type 'struct CompositeOfScalars' used in OpenACC 'reduction' variable reference; type is not a scalar value}}
-  // expected-note@+3{{used as element type of array type 'CompositeHasComposite[5]'}}
+  // expected-error@+3{{invalid type 'struct CompositeOfScalars' used in OpenACC 'reduction' variable reference; type is not a scalar value}}
   // expected-note@#COS_FIELD{{used as field 'COS' of composite 'CompositeHasComposite'}}
   // expected-note@+1{{OpenACC 'reduction' variable reference must be a scalar variable or a composite of scalars, or an array, sub-array, or element of scalar types}}
 #pragma acc loop reduction(+:CoCArr[3])
     for(int i = 0; i < 5; ++i);
-  // expected-error@+4{{invalid type 'struct CompositeOfScalars' used in OpenACC 'reduction' variable reference; type is not a scalar value}}
-  // expected-note@+3{{used as element type of sub-array type 'CompositeHasComposite'}}
+  // expected-error@+3{{invalid type 'struct CompositeOfScalars' used in OpenACC 'reduction' variable reference; type is not a scalar value}}
   // expected-note@#COS_FIELD{{used as field 'COS' of composite 'CompositeHasComposite'}}
   // expected-note@+1{{OpenACC 'reduction' variable reference must be a scalar variable or a composite of scalars, or an array, sub-array, or element of scalar types}}
 #pragma acc loop reduction(+:CoCArr[1:1])
@@ -383,4 +377,47 @@ void inst() {
   templ_uses<int, CompositeOfScalars, CompositeHasComposite, 1, 2>();
 }
 
+namespace gh207180 {
+struct InlineDefFunc {
+  int I;
+  void func() {
+#pragma acc loop reduction(+:I)
+    // expected-error@+3{{OpenACC 'reduction' variable must have the same operator in all nested constructs (& vs +)}}
+    for(int i = 0; i < 5; ++i)
+    // expected-note@-3{{previous 'reduction' clause is here}}
+#pragma acc loop reduction(&:I)
+    for(int j = 0; j < 5; ++j);
+  }
+};
+struct OutlineDefFunc {
+  int I;
+  void func();
+};
+void OutlineDefFunc::func() {
+#pragma acc loop reduction(+:I)
+  // expected-error@+3{{OpenACC 'reduction' variable must have the same operator in all nested constructs (& vs +)}}
+    for(int i = 0; i < 5; ++i)
+  // expected-note@-3{{previous 'reduction' clause is here}}
+#pragma acc loop reduction(&:I)
+  for(int j = 0; j < 5; ++j);
+}
 
+template<typename T>
+struct TemplDefFunc {
+  T I;
+  void func() {
+#pragma acc loop reduction(+:I)
+    // expected-error@+3{{OpenACC 'reduction' variable must have the same operator in all nested constructs (& vs +)}}
+    for(int i = 0; i < 5; ++i)
+    // expected-note@-3{{previous 'reduction' clause is here}}
+#pragma acc loop reduction(&:I)
+    for(int j = 0; j < 5; ++j);
+  }
+};
+
+void use() {
+  TemplDefFunc<int> d;
+  d.func(); // expected-note{{in instantiation of}}
+}
+
+}

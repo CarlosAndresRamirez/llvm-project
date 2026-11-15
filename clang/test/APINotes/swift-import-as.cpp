@@ -8,6 +8,9 @@
 // RUN: %clang_cc1 -fmodules -fblocks -fimplicit-module-maps -fmodules-cache-path=%t/ModulesCache -fdisable-module-hash -fapinotes-modules -I %S/Inputs/Headers %s -x c++ -ast-dump -ast-dump-filter CopyableType | FileCheck -check-prefix=CHECK-COPYABLE %s
 // RUN: %clang_cc1 -fmodules -fblocks -fimplicit-module-maps -fmodules-cache-path=%t/ModulesCache -fdisable-module-hash -fapinotes-modules -I %S/Inputs/Headers %s -x c++ -ast-dump -ast-dump-filter NonEscapableType | FileCheck -check-prefix=CHECK-NON-ESCAPABLE %s
 // RUN: %clang_cc1 -fmodules -fblocks -fimplicit-module-maps -fmodules-cache-path=%t/ModulesCache -fdisable-module-hash -fapinotes-modules -I %S/Inputs/Headers %s -x c++ -ast-dump -ast-dump-filter EscapableType | FileCheck -check-prefix=CHECK-ESCAPABLE %s
+// RUN: %clang_cc1 -fmodules -fblocks -fimplicit-module-maps -fmodules-cache-path=%t/ModulesCache -fdisable-module-hash -fapinotes-modules -I %S/Inputs/Headers %s -x c++ -ast-dump -ast-dump-filter EscapableAnnotatedInHeader | FileCheck -check-prefix=CHECK-ESCAPABLE-IN-HEADER %s
+// RUN: %clang_cc1 -fmodules -fblocks -fimplicit-module-maps -fmodules-cache-path=%t/ModulesCache -fdisable-module-hash -fapinotes-modules -I %S/Inputs/Headers %s -x c++ -ast-dump -ast-dump-filter NoncopyableAnnotatedInHeader | FileCheck -check-prefix=CHECK-NONCOPYABLE-IN-HEADER %s
+// RUN: %clang_cc1 -fmodules -fblocks -fimplicit-module-maps -fmodules-cache-path=%t/ModulesCache -fdisable-module-hash -fapinotes-modules -I %S/Inputs/Headers %s -x c++ -ast-dump -ast-dump-filter EscapabilityConflict | FileCheck -check-prefix=CHECK-ESCAPABILITY-CONFLICT %s
 // RUN: %clang_cc1 -fmodules -fblocks -fimplicit-module-maps -fmodules-cache-path=%t/ModulesCache -fdisable-module-hash -fapinotes-modules -I %S/Inputs/Headers %s -x c++ -ast-dump -ast-dump-filter functionReturningFrt__ | FileCheck -check-prefix=CHECK-FUNCTION-RETURNING-FRT %s
 // RUN: %clang_cc1 -fmodules -fblocks -fimplicit-module-maps -fmodules-cache-path=%t/ModulesCache -fdisable-module-hash -fapinotes-modules -I %S/Inputs/Headers %s -x c++ -ast-dump -ast-dump-filter functionReturningFrt_returns_unretained | FileCheck -check-prefix=CHECK-FUNCTION-RETURNING-FRT-UNRETAINED %s
 // RUN: %clang_cc1 -fmodules -fblocks -fimplicit-module-maps -fmodules-cache-path=%t/ModulesCache -fdisable-module-hash -fapinotes-modules -I %S/Inputs/Headers %s -x c++ -ast-dump -ast-dump-filter functionReturningFrt_returns_retained | FileCheck -check-prefix=CHECK-FUNCTION-RETURNING-FRT-RETAINED %s
@@ -16,6 +19,7 @@
 // RUN: %clang_cc1 -fmodules -fblocks -fimplicit-module-maps -fmodules-cache-path=%t/ModulesCache -fdisable-module-hash -fapinotes-modules -I %S/Inputs/Headers %s -x c++ -ast-dump -ast-dump-filter methodReturningFrt_returns_retained | FileCheck -check-prefix=CHECK-METHOD-RETURNING-FRT-RETAINED %s
 // RUN: %clang_cc1 -fmodules -fblocks -fimplicit-module-maps -fmodules-cache-path=%t/ModulesCache -fdisable-module-hash -fapinotes-modules -I %S/Inputs/Headers %s -x c++ -ast-dump -ast-dump-filter WrappedOptions | FileCheck -check-prefix=CHECK-WRAPPED-OPTIONS %s
 // RUN: %clang_cc1 -fmodules -fblocks -fimplicit-module-maps -fmodules-cache-path=%t/ModulesCache -fdisable-module-hash -fapinotes-modules -I %S/Inputs/Headers %s -x c++ -ast-dump -ast-dump-filter NoncopyableWithDestroyType | FileCheck -check-prefix=CHECK-NONCOPYABLE-WITH-DESTROY %s
+// RUN: %clang_cc1 -fmodules -fblocks -fimplicit-module-maps -fmodules-cache-path=%t/ModulesCache -fdisable-module-hash -fapinotes-modules -I %S/Inputs/Headers %s -x c++ -ast-dump -ast-dump-filter ImportAsUnsafe | FileCheck -check-prefix=CHECK-IMPORT-AS-UNSAFE %s
 
 #include <SwiftImportAs.h>
 
@@ -42,15 +46,17 @@
 // CHECK-OPAQUE-REF-COUNTED: SwiftAttrAttr {{.+}} <<invalid sloc>> "import_reference"
 // CHECK-OPAQUE-REF-COUNTED: SwiftAttrAttr {{.+}} <<invalid sloc>> "retain:ORCRetain"
 // CHECK-OPAQUE-REF-COUNTED: SwiftAttrAttr {{.+}} <<invalid sloc>> "release:ORCRelease"
-// CHECK-OPAQUE-REF-COUNTED-NOT: SwiftAttrAttr {{.+}} <<invalid sloc>> "release:ORCRelease"
+// CHECK-OPAQUE-REF-COUNTED-NOT: SwiftAttrAttr {{.*}}"release:ORCRelease"
 
+// The redeclaration inherits the annotations rather than having API notes
+// applied a second time, so it carries one copy of each, marked Inherited.
 // CHECK-OPAQUE-REF-COUNTED: Dumping OpaqueRefCountedType:
 // CHECK-OPAQUE-REF-COUNTED-NEXT: CXXRecordDecl {{.+}} imported in SwiftImportAs{{.*}}struct OpaqueRefCountedType
-// CHECK-OPAQUE-REF-COUNTED: SwiftAttrAttr {{.+}} <<invalid sloc>> "import_reference"
-// CHECK-OPAQUE-REF-COUNTED: SwiftAttrAttr {{.+}} <<invalid sloc>> "retain:ORCRetain"
-// CHECK-OPAQUE-REF-COUNTED: SwiftAttrAttr {{.+}} <<invalid sloc>> "release:ORCRelease"
+// CHECK-OPAQUE-REF-COUNTED: SwiftAttrAttr {{.+}} <<invalid sloc>> Inherited "import_reference"
+// CHECK-OPAQUE-REF-COUNTED: SwiftAttrAttr {{.+}} <<invalid sloc>> Inherited "retain:ORCRetain"
+// CHECK-OPAQUE-REF-COUNTED: SwiftAttrAttr {{.+}} <<invalid sloc>> Inherited "release:ORCRelease"
 
-// CHECK-OPAQUE-REF-COUNTED-NOT: SwiftAttrAttr {{.+}} <<invalid sloc>> "release:
+// CHECK-OPAQUE-REF-COUNTED-NOT: SwiftAttrAttr {{.*}}"release:
 // CHECK-NON-COPYABLE: Dumping NonCopyableType:
 // CHECK-NON-COPYABLE-NEXT: CXXRecordDecl {{.+}} imported in SwiftImportAs {{.+}} struct NonCopyableType
 // CHECK-NON-COPYABLE: SwiftAttrAttr {{.+}} <<invalid sloc>> "~Copyable"
@@ -67,6 +73,23 @@
 // CHECK-ESCAPABLE: Dumping EscapableType:
 // CHECK-ESCAPABLE-NEXT: CXXRecordDecl {{.+}} imported in SwiftImportAs {{.+}} struct EscapableType
 // CHECK-ESCAPABLE: SwiftAttrAttr {{.+}} "Escapable"
+
+// An annotation from API notes does not repeat one that the header already has.
+// CHECK-ESCAPABLE-IN-HEADER: Dumping EscapableAnnotatedInHeader:
+// CHECK-ESCAPABLE-IN-HEADER-NEXT: CXXRecordDecl {{.+}} imported in SwiftImportAs {{.+}} struct EscapableAnnotatedInHeader
+// CHECK-ESCAPABLE-IN-HEADER: SwiftAttrAttr {{.+}} "Escapable"
+// CHECK-ESCAPABLE-IN-HEADER-NOT: SwiftAttrAttr {{.+}} "Escapable"
+
+// CHECK-NONCOPYABLE-IN-HEADER: Dumping NoncopyableAnnotatedInHeader:
+// CHECK-NONCOPYABLE-IN-HEADER-NEXT: CXXRecordDecl {{.+}} imported in SwiftImportAs {{.+}} struct NoncopyableAnnotatedInHeader
+// CHECK-NONCOPYABLE-IN-HEADER: SwiftAttrAttr {{.+}} "~Copyable"
+// CHECK-NONCOPYABLE-IN-HEADER-NOT: SwiftAttrAttr {{.+}} "~Copyable"
+
+// An annotation that disagrees with the header is still added.
+// CHECK-ESCAPABILITY-CONFLICT: Dumping EscapabilityConflict:
+// CHECK-ESCAPABILITY-CONFLICT-NEXT: CXXRecordDecl {{.+}} imported in SwiftImportAs {{.+}} struct EscapabilityConflict
+// CHECK-ESCAPABILITY-CONFLICT: SwiftAttrAttr {{.+}} "Escapable"
+// CHECK-ESCAPABILITY-CONFLICT: SwiftAttrAttr {{.+}} "~Escapable"
 
 // CHECK-FUNCTION-RETURNING-FRT: Dumping functionReturningFrt__:
 // CHECK-FUNCTION-RETURNING-FRT: FunctionDecl {{.+}} imported in SwiftImportAs functionReturningFrt__ 'ImmortalRefType *()'
@@ -103,3 +126,32 @@
 // CHECK-NONCOPYABLE-WITH-DESTROY: RecordDecl {{.*}}struct NoncopyableWithDestroyType
 // CHECK-NONCOPYABLE-WITH-DESTROY: SwiftAttrAttr {{.+}} "destroy:NCDDestroy"
 // CHECK-NONCOPYABLE-WITH-DESTROY: SwiftAttrAttr {{.+}} "~Copyable"
+
+// CHECK-IMPORT-AS-UNSAFE: Dumping ImportAsUnsafe:
+// CHECK-IMPORT-AS-UNSAFE: FunctionDecl {{.+}} ImportAsUnsafe
+// CHECK-IMPORT-AS-UNSAFE: SwiftAttrAttr {{.+}} "unsafe"
+
+// CHECK-IMPORT-AS-UNSAFE: Dumping ImportAsUnsafeStruct:
+// CHECK-IMPORT-AS-UNSAFE: CXXRecordDecl {{.+}} ImportAsUnsafeStruct
+// CHECK-IMPORT-AS-UNSAFE: SwiftAttrAttr {{.+}} "unsafe"
+
+// CHECK-IMPORT-AS-UNSAFE: Dumping StructWithUnsafeMethod::ImportAsUnsafeMethod:
+// CHECK-IMPORT-AS-UNSAFE: CXXMethodDecl {{.+}} ImportAsUnsafeMethod
+// CHECK-IMPORT-AS-UNSAFE: SwiftAttrAttr {{.+}} "unsafe"
+
+// CHECK-IMPORT-AS-UNSAFE: Dumping StructWithUnsafeMethod::ImportAsUnsafeMethodActuallySafe:
+// CHECK-IMPORT-AS-UNSAFE: CXXMethodDecl {{.+}} ImportAsUnsafeMethodActuallySafe
+// CHECK-IMPORT-AS-UNSAFE: SwiftAttrAttr {{.+}} "safe"
+
+// CHECK-IMPORT-AS-UNSAFE: Dumping ImportAsUnsafeAlreadyAnnotated:
+// CHECK-IMPORT-AS-UNSAFE: FunctionDecl {{.+}} ImportAsUnsafeAlreadyAnnotated
+// CHECK-IMPORT-AS-UNSAFE: SwiftVersionedAdditionAttr {{.+}} IsReplacedByActive
+// CHECK-IMPORT-AS-UNSAFE: SwiftAttrAttr {{.+}} "unsafe"
+// CHECK-IMPORT-AS-UNSAFE-EMPTY:
+
+// CHECK-IMPORT-AS-UNSAFE: Dumping ImportAsUnsafeVersioned:
+// CHECK-IMPORT-AS-UNSAFE: FunctionDecl {{.+}} ImportAsUnsafeVersioned
+// CHECK-IMPORT-AS-UNSAFE: SwiftVersionedAdditionAttr {{.+}} 3.0
+// CHECK-IMPORT-AS-UNSAFE: SwiftAttrAttr {{.+}} "unsafe"
+// CHECK-IMPORT-AS-UNSAFE: SwiftVersionedAdditionAttr {{.+}} 6.0
+// CHECK-IMPORT-AS-UNSAFE: SwiftAttrAttr {{.+}} "safe"

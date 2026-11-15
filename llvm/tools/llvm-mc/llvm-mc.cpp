@@ -13,14 +13,14 @@
 
 #include "Disassembler.h"
 #include "llvm/ADT/ScopeExit.h"
-#include "llvm/DWARFCFIChecker/DWARFCFIFunctionFrameAnalyzer.h"
-#include "llvm/DWARFCFIChecker/DWARFCFIFunctionFrameStreamer.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/MC/MCAsmBackend.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCCodeEmitter.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCInstPrinter.h"
 #include "llvm/MC/MCInstrInfo.h"
+#include "llvm/MC/MCLFI.h"
 #include "llvm/MC/MCObjectFileInfo.h"
 #include "llvm/MC/MCObjectWriter.h"
 #include "llvm/MC/MCParser/AsmLexer.h"
@@ -32,21 +32,22 @@
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Compression.h"
-#include "llvm/Support/FileUtilities.h"
 #include "llvm/Support/FormattedStream.h"
 #include "llvm/Support/InitLLVM.h"
+#include "llvm/Support/LibraryOptionsContext.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
+#include "llvm/Support/SourceMgrDiagnosticVerifier.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/Support/ToolOutputFile.h"
+#include "llvm/Support/VirtualFileSystem.h"
 #include "llvm/Support/WithColor.h"
 #include "llvm/TargetParser/Host.h"
 #include <memory>
+#include <optional>
 
 using namespace llvm;
-
-static mc::RegisterMCTargetOptionsFlags MOF;
 
 static cl::OptionCategory MCCategory("MC Options");
 
@@ -217,9 +218,11 @@ static cl::opt<bool> NoExecStack("no-exec-stack",
                                  cl::desc("File doesn't need an exec stack"),
                                  cl::cat(MCCategory));
 
-static cl::opt<bool> ValidateCFI("validate-cfi",
-                                 cl::desc("Validate the CFI directives"),
-                                 cl::cat(MCCategory));
+static cl::list<std::string>
+    Verify("verify", cl::CommaSeparated, cl::ValueOptional,
+           cl::desc("Check diagnostics against '<prefix>-<kind>' comments in "
+                    "the input (default prefix: 'expected')"),
+           cl::value_desc("prefixes"), cl::cat(MCCategory));
 
 enum ActionType {
   AC_AsLex,
@@ -333,13 +336,15 @@ static int fillCommandLineSymbols(MCAsmParser &Parser) {
     auto Val = Pair.second;
 
     if (Sym.empty() || Val.empty()) {
-      WithColor::error() << "defsym must be of the form: sym=value: " << I
-                         << "\n";
+      Parser.getSourceManager().PrintMessage(
+          SMLoc(), SourceMgr::DK_Error,
+          "defsym must be of the form: sym=value: " + I);
       return 1;
     }
     int64_t Value;
     if (Val.getAsInteger(0, Value)) {
-      WithColor::error() << "value is not an integer: " << Val << "\n";
+      Parser.getSourceManager().PrintMessage(SMLoc(), SourceMgr::DK_Error,
+                                             "value is not an integer: " + Val);
       return 1;
     }
     Parser.getContext().setSymbolValue(Parser.getStreamer(), Sym, Value);
@@ -347,18 +352,18 @@ static int fillCommandLineSymbols(MCAsmParser &Parser) {
   return 0;
 }
 
-static int AssembleInput(const char *ProgName, const Target *TheTarget,
-                         SourceMgr &SrcMgr, MCContext &Ctx, MCStreamer &Str,
-                         MCAsmInfo &MAI, MCSubtargetInfo &STI,
-                         MCInstrInfo &MCII, MCTargetOptions const &MCOptions) {
+static int AssembleInput(const Target *TheTarget, SourceMgr &SrcMgr,
+                         MCContext &Ctx, MCStreamer &Str, MCAsmInfo &MAI,
+                         MCSubtargetInfo &STI, MCInstrInfo &MCII,
+                         MCTargetOptions const &MCOptions) {
   std::unique_ptr<MCAsmParser> Parser(
       createMCAsmParser(SrcMgr, Ctx, Str, MAI));
   std::unique_ptr<MCTargetAsmParser> TAP(
-      TheTarget->createMCAsmParser(STI, *Parser, MCII, MCOptions));
+      TheTarget->createMCAsmParser(STI, *Parser, MCII));
 
   if (!TAP) {
-    WithColor::error(errs(), ProgName)
-        << "this target does not support assembly parsing.\n";
+    SrcMgr.PrintMessage(SMLoc(), SourceMgr::DK_Error,
+                        "this target does not support assembly parsing.");
     return 1;
   }
 
@@ -389,12 +394,15 @@ int main(int argc, char **argv) {
   cl::AddExtraVersionPrinter(TargetRegistry::printRegisteredTargetsForVersion);
 
   cl::HideUnrelatedOptions({&MCCategory, &getColorCategory()});
-  cl::ParseCommandLineOptions(argc, argv, "llvm machine code playground\n");
+  cl::LibraryOptionsContext LibraryOptions;
+  cl::parseCommandLineOptions(LibraryOptions, mc::getToolOptions(),
+                              ArrayRef(argv, argc),
+                              "llvm machine code playground\n");
 
   if (TimeTrace)
     timeTraceProfilerInitialize(TimeTraceGranularity, argv[0]);
 
-  auto TimeTraceScopeExit = make_scope_exit([]() {
+  llvm::scope_exit TimeTraceScopeExit([]() {
     if (!TimeTrace)
       return;
     if (auto E = timeTraceProfilerWrite(TimeTraceFile, OutputFilename)) {
@@ -404,17 +412,46 @@ int main(int argc, char **argv) {
     timeTraceProfilerCleanup();
   });
 
-  MCTargetOptions MCOptions = mc::InitMCTargetOptionsFromFlags();
+  MCTargetOptions MCOptions = mc::getMCTargetOptions(LibraryOptions);
   MCOptions.CompressDebugSections = CompressDebugSections.getValue();
   MCOptions.ShowMCInst = ShowInst;
   MCOptions.AsmVerbose = true;
+  MCOptions.MCNoExecStack = NoExecStack;
   MCOptions.MCUseDwarfDirectory = MCTargetOptions::EnableDwarfDirectory;
   MCOptions.InstPrinterOptions = InstPrinterOptions;
+  if (OutputAsmVariant.getNumOccurrences())
+    MCOptions.OutputAsmVariant = OutputAsmVariant;
 
   setDwarfDebugFlags(argc, argv);
   setDwarfDebugProducer();
 
   const char *ProgName = argv[0];
+
+  SmallVector<StringRef> VerifyPrefixes;
+  for (StringRef Prefix : Verify) {
+    if (Prefix.empty())
+      continue;
+    if (!isAlpha(Prefix[0]) || !all_of(Prefix, [](char C) {
+          return isAlnum(C) || C == '-' || C == '_';
+        })) {
+      WithColor::error(errs(), ProgName)
+          << "invalid prefix '" << Prefix
+          << "' for --verify: prefixes must start with a letter and contain "
+             "only alphanumeric characters, hyphens and underscores\n";
+      return 1;
+    }
+    VerifyPrefixes.push_back(Prefix);
+  }
+  if (Verify.getNumOccurrences() && VerifyPrefixes.empty())
+    VerifyPrefixes.push_back("expected");
+  // --as-lex prints lexer errors as tokens rather than reporting diagnostics,
+  // so there would be nothing to verify.
+  if (!VerifyPrefixes.empty() && Action == AC_AsLex) {
+    WithColor::error(errs(), ProgName)
+        << "--verify is not supported with --as-lex\n";
+    return 1;
+  }
+
   const Target *TheTarget = GetTarget(ProgName);
   if (!TheTarget)
     return 1;
@@ -439,12 +476,13 @@ int main(int argc, char **argv) {
   // Record the location of the include directories so that the lexer can find
   // it later.
   SrcMgr.setIncludeDirs(IncludeDirs);
+  SrcMgr.setVirtualFileSystem(vfs::getRealFileSystem());
 
-  std::unique_ptr<MCRegisterInfo> MRI(TheTarget->createMCRegInfo(TripleName));
+  std::unique_ptr<MCRegisterInfo> MRI(TheTarget->createMCRegInfo(TheTriple));
   assert(MRI && "Unable to create target register info!");
 
   std::unique_ptr<MCAsmInfo> MAI(
-      TheTarget->createMCAsmInfo(*MRI, TripleName, MCOptions));
+      TheTarget->createMCAsmInfo(*MRI, TheTriple, MCOptions));
   assert(MAI && "Unable to create target asm info!");
 
   if (CompressDebugSections != DebugCompressionType::None) {
@@ -459,30 +497,77 @@ int main(int argc, char **argv) {
   MAI->setCommentColumn(CommentColumn);
 
   // Package up features to be passed to target/subtarget
+  SubtargetFeatures Features;
   std::string FeaturesStr;
-  if (MAttrs.size()) {
-    SubtargetFeatures Features;
-    for (unsigned i = 0; i != MAttrs.size(); ++i)
-      Features.AddFeature(MAttrs[i]);
-    FeaturesStr = Features.getString();
+
+  // Replace -mcpu=native with Host CPU and features.
+  if (MCPU == "native") {
+    MCPU = std::string(llvm::sys::getHostCPUName());
+
+    llvm::StringMap<bool> TargetFeatures = llvm::sys::getHostCPUFeatures();
+    for (auto const &[FeatureName, IsSupported] : TargetFeatures)
+      Features.AddFeature(FeatureName, IsSupported);
   }
 
+  // Handle features passed to target/subtarget.
+  for (unsigned i = 0; i != MAttrs.size(); ++i)
+    Features.AddFeature(MAttrs[i]);
+  FeaturesStr = Features.getString();
+
   std::unique_ptr<MCSubtargetInfo> STI(
-      TheTarget->createMCSubtargetInfo(TripleName, MCPU, FeaturesStr));
-  assert(STI && "Unable to create subtarget info!");
+      TheTarget->createMCSubtargetInfo(TheTriple, MCPU, FeaturesStr));
+  if (!STI) {
+    WithColor::error(errs(), ProgName) << "unable to create subtarget info\n";
+    return 1;
+  }
 
   // FIXME: This is not pretty. MCContext has a ptr to MCObjectFileInfo and
   // MCObjectFileInfo needs a MCContext reference in order to initialize itself.
-  MCContext Ctx(TheTriple, MAI.get(), MRI.get(), STI.get(), &SrcMgr,
-                &MCOptions);
+  MCContext Ctx(TheTriple, *MAI, *MRI, *STI, &SrcMgr);
   std::unique_ptr<MCObjectFileInfo> MOFI(
       TheTarget->createMCObjectFileInfo(Ctx, PIC, LargeCodeModel));
   Ctx.setObjectFileInfo(MOFI.get());
 
+  std::optional<SourceMgrDiagnosticVerifier> Verifier;
+  if (!VerifyPrefixes.empty()) {
+    Verifier.emplace(VerifyPrefixes);
+    // Scan the input up front so that its directives are checked even if it
+    // produces no diagnostics.
+    (void)Verifier->computeExpectedDiags(errs(), SrcMgr,
+                                         SrcMgr.getMemoryBuffer(1));
+    // Most diagnostics are reported through SrcMgr, but some (e.g. from the
+    // CFI checker) are only reported through Ctx, so route both to Ctx.
+    Ctx.setDiagnosticHandler([&](const SMDiagnostic &Diag, bool,
+                                 const SourceMgr &,
+                                 std::vector<const MDNode *> &) {
+      SMLoc Loc = Diag.getLoc();
+      const MemoryBuffer *Buf = nullptr;
+      if (unsigned ID = Loc.isValid() ? SrcMgr.FindBufferContainingLoc(Loc) : 0)
+        Buf = SrcMgr.getMemoryBuffer(ID);
+      // SMDiagnostic columns are 0-based, but printed (and written in
+      // directives) as 1-based.
+      if (Verifier->process(errs(), SrcMgr, Diag.getKind(), Loc.isValid(), Buf,
+                            Diag.getLineNo(), Diag.getColumnNo() + 1,
+                            Diag.getMessage()) !=
+          SourceMgrDiagnosticVerifier::MatchResult::Unexpected)
+        return;
+      SourceMgrDiagnosticVerifier::printMessage(
+          errs(), SrcMgr, Buf ? Loc : SMLoc(),
+          "unexpected " +
+              SourceMgrDiagnosticVerifier::getDiagKindStr(Diag.getKind()) +
+              ": " + Diag.getMessage());
+    });
+    SrcMgr.setDiagHandler(
+        [](const SMDiagnostic &Diag, void *Ctx) {
+          static_cast<MCContext *>(Ctx)->diagnose(Diag);
+        },
+        &Ctx);
+  }
+
   Ctx.setGenDwarfForAssembly(GenDwarfForAssembly);
   // Default to 4 for dwarf version.
   unsigned DwarfVersion = MCOptions.DwarfVersion ? MCOptions.DwarfVersion : 4;
-  if (DwarfVersion < 2 || DwarfVersion > 5) {
+  if (DwarfVersion < 2 || DwarfVersion > 6) {
     errs() << ProgName << ": Dwarf version " << DwarfVersion
            << " is not supported." << '\n';
     return 1;
@@ -560,24 +645,16 @@ int main(int argc, char **argv) {
   assert(MCII && "Unable to create instruction info!");
 
   std::unique_ptr<MCInstPrinter> IP;
-  if (ValidateCFI) {
-    // TODO: The DWARF CFI checker support for emitting anything other than
-    // errors and warnings has not been implemented yet. Because of this, it is
-    // assert-checked that the filetype output is null.
-    assert(FileType == OFT_Null);
-    auto FFA = std::make_unique<CFIFunctionFrameAnalyzer>(Ctx, *MCII);
-    auto FFS = std::make_unique<CFIFunctionFrameStreamer>(Ctx, std::move(FFA));
-    TheTarget->createNullTargetStreamer(*FFS);
-    Str = std::move(FFS);
-  } else if (FileType == OFT_AssemblyFile) {
-    IP.reset(TheTarget->createMCInstPrinter(
-        Triple(TripleName), OutputAsmVariant, *MAI, *MCII, *MRI));
+  if (FileType == OFT_AssemblyFile) {
+    unsigned AsmVariant = MAI->getOutputAssemblerDialect();
+    IP.reset(TheTarget->createMCInstPrinter(Triple(TripleName), AsmVariant,
+                                            *MAI, *MCII, *MRI));
 
     if (!IP) {
       WithColor::error()
           << "unable to create instruction printer for target triple '"
-          << TheTriple.normalize() << "' with assembly variant "
-          << OutputAsmVariant << ".\n";
+          << TheTriple.normalize() << "' with assembly variant " << AsmVariant
+          << "\n";
       return 1;
     }
 
@@ -612,6 +689,9 @@ int main(int argc, char **argv) {
     Str.reset(TheTarget->createAsmStreamer(Ctx, std::move(FOut), std::move(IP),
                                            std::move(CE), std::move(MAB)));
 
+    Triple T(TripleName);
+    if (T.isLFI())
+      initializeLFIMCStreamer(*Str.get(), Ctx, T);
   } else if (FileType == OFT_Null) {
     Str.reset(TheTarget->createNullStreamer(Ctx));
   } else {
@@ -629,8 +709,6 @@ int main(int argc, char **argv) {
         DwoOut ? MAB->createDwoObjectWriter(*OS, DwoOut->os())
                : MAB->createObjectWriter(*OS),
         std::unique_ptr<MCCodeEmitter>(CE), *STI));
-    if (NoExecStack)
-      Str->switchSection(Ctx.getAsmInfo()->getNonexecutableStackSection(Ctx));
     Str->emitVersionForTarget(TheTriple, VersionTuple(), nullptr,
                               VersionTuple());
   }
@@ -642,8 +720,8 @@ int main(int argc, char **argv) {
     Res = AsLexInput(SrcMgr, *MAI, Out->os());
     break;
   case AC_Assemble:
-    Res = AssembleInput(ProgName, TheTarget, SrcMgr, Ctx, *Str, *MAI, *STI,
-                        *MCII, MCOptions);
+    Res = AssembleInput(TheTarget, SrcMgr, Ctx, *Str, *MAI, *STI, *MCII,
+                        MCOptions);
     break;
   case AC_MDisassemble:
   case AC_CDisassemble:
@@ -652,16 +730,17 @@ int main(int argc, char **argv) {
     break;
   }
   if (disassemble)
-    Res = Disassembler::disassemble(*TheTarget, TripleName, *STI, *Str, *Buffer,
-                                    SrcMgr, Ctx, MCOptions, HexBytes,
-                                    NumBenchmarkRuns);
+    Res = Disassembler::disassemble(*TheTarget, *STI, *Str, *Buffer, SrcMgr,
+                                    Ctx, HexBytes, NumBenchmarkRuns);
+
+  bool Verified = !Verifier || Verifier->verify(errs(), SrcMgr);
 
   // Keep output if no errors.
-  if (Res == 0) {
+  if (Res == 0 && Verified) {
     Out->keep();
     if (DwoOut)
       DwoOut->keep();
   }
 
-  return Res;
+  return Verifier ? !Verified : Res;
 }

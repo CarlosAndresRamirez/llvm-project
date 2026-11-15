@@ -114,10 +114,6 @@ private:
   /// \returns A pointer to the root.
   SuffixTreeInternalNode *insertRoot();
 
-  /// Set the suffix indices of the leaves to the start indices of their
-  /// respective suffixes.
-  void setSuffixIndices();
-
   /// Construct the suffix tree for the prefix of the input ending at
   /// \p EndIdx.
   ///
@@ -219,7 +215,7 @@ public:
     }
   };
 
-  typedef RepeatedSubstringIterator iterator;
+  using iterator = RepeatedSubstringIterator;
   iterator begin() { return iterator(Root, LeafNodes); }
   iterator end() { return iterator(nullptr); }
 };

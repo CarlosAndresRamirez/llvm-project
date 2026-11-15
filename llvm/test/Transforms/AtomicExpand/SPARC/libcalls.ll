@@ -1,4 +1,4 @@
-; RUN: opt -S %s -passes=atomic-expand | FileCheck %s
+; RUN: opt -S %s -passes='require<libcall-lowering-info>,atomic-expand' | FileCheck %s
 
 ;;; NOTE: this test is actually target-independent -- any target which
 ;;; doesn't support inline atomics can be used. (E.g. X86 i386 would
@@ -13,7 +13,7 @@ target triple = "sparc-unknown-unknown"
 ;; straightforward.
 
 ; CHECK-LABEL: @test_load_i16(
-; CHECK:  %1 = call i16 @__atomic_load_2(ptr %arg, i32 5)
+; CHECK:  %1 = call zeroext i16 @__atomic_load_2(ptr %arg, i32 5)
 ; CHECK:  ret i16 %1
 define i16 @test_load_i16(ptr %arg) {
   %ret = load atomic i16, ptr %arg seq_cst, align 4
@@ -21,7 +21,7 @@ define i16 @test_load_i16(ptr %arg) {
 }
 
 ; CHECK-LABEL: @test_store_i16(
-; CHECK:  call void @__atomic_store_2(ptr %arg, i16 %val, i32 5)
+; CHECK:  call void @__atomic_store_2(ptr %arg, i16 zeroext %val, i32 5)
 ; CHECK:  ret void
 define void @test_store_i16(ptr %arg, i16 %val) {
   store atomic i16 %val, ptr %arg seq_cst, align 4
@@ -29,7 +29,7 @@ define void @test_store_i16(ptr %arg, i16 %val) {
 }
 
 ; CHECK-LABEL: @test_exchange_i16(
-; CHECK:  %1 = call i16 @__atomic_exchange_2(ptr %arg, i16 %val, i32 5)
+; CHECK:  %1 = call zeroext i16 @__atomic_exchange_2(ptr %arg, i16 zeroext %val, i32 5)
 ; CHECK:  ret i16 %1
 define i16 @test_exchange_i16(ptr %arg, i16 %val) {
   %ret = atomicrmw xchg ptr %arg, i16 %val seq_cst
@@ -40,7 +40,7 @@ define i16 @test_exchange_i16(ptr %arg, i16 %val) {
 ; CHECK:  %1 = alloca i16, align 2
 ; CHECK:  call void @llvm.lifetime.start.p0(ptr %1)
 ; CHECK:  store i16 %old, ptr %1, align 2
-; CHECK:  %2 = call zeroext i1 @__atomic_compare_exchange_2(ptr %arg, ptr %1, i16 %new, i32 5, i32 0)
+; CHECK:  %2 = call zeroext i1 @__atomic_compare_exchange_2(ptr %arg, ptr %1, i16 zeroext %new, i32 5, i32 0)
 ; CHECK:  %3 = load i16, ptr %1, align 2
 ; CHECK:  call void @llvm.lifetime.end.p0(ptr %1)
 ; CHECK:  %4 = insertvalue { i16, i1 } poison, i16 %3, 0
@@ -54,7 +54,7 @@ define i16 @test_cmpxchg_i16(ptr %arg, i16 %old, i16 %new) {
 }
 
 ; CHECK-LABEL: @test_add_i16(
-; CHECK:  %1 = call i16 @__atomic_fetch_add_2(ptr %arg, i16 %val, i32 5)
+; CHECK:  %1 = call zeroext i16 @__atomic_fetch_add_2(ptr %arg, i16 zeroext %val, i32 5)
 ; CHECK:  ret i16 %1
 define i16 @test_add_i16(ptr %arg, i16 %val) {
   %ret = atomicrmw add ptr %arg, i16 %val seq_cst
@@ -134,23 +134,27 @@ define i128 @test_cmpxchg_i128(ptr %arg, i128 %old, i128 %new) {
 ; CHECK-LABEL: @test_add_i128(
 ; CHECK:  %1 = alloca i128, align 8
 ; CHECK:  %2 = alloca i128, align 8
-; CHECK:  %3 = load i128, ptr %arg, align 16
+; CHECK:  %3 = alloca i128, align 8
+; CHECK:  call void @llvm.lifetime.start.p0(ptr %3)
+; CHECK:  call void @__atomic_load(i32 16, ptr %arg, ptr %3, i32 0)
+; CHECK:  %4 = load i128, ptr %3, align 8
+; CHECK:  call void @llvm.lifetime.end.p0(ptr %3)
 ; CHECK:  br label %atomicrmw.start
 ; CHECK:atomicrmw.start:
-; CHECK:  %loaded = phi i128 [ %3, %0 ], [ %newloaded, %atomicrmw.start ]
+; CHECK:  %loaded = phi i128 [ %4, %0 ], [ %newloaded, %atomicrmw.start ]
 ; CHECK:  %new = add i128 %loaded, %val
 ; CHECK:  call void @llvm.lifetime.start.p0(ptr %1)
 ; CHECK:  store i128 %loaded, ptr %1, align 8
 ; CHECK:  call void @llvm.lifetime.start.p0(ptr %2)
 ; CHECK:  store i128 %new, ptr %2, align 8
-; CHECK:  %4 = call zeroext i1 @__atomic_compare_exchange(i32 16, ptr %arg, ptr %1, ptr %2, i32 5, i32 5)
+; CHECK:  %5 = call zeroext i1 @__atomic_compare_exchange(i32 16, ptr %arg, ptr %1, ptr %2, i32 5, i32 5)
 ; CHECK:  call void @llvm.lifetime.end.p0(ptr %2)
-; CHECK:  %5 = load i128, ptr %1, align 8
+; CHECK:  %6 = load i128, ptr %1, align 8
 ; CHECK:  call void @llvm.lifetime.end.p0(ptr %1)
-; CHECK:  %6 = insertvalue { i128, i1 } poison, i128 %5, 0
-; CHECK:  %7 = insertvalue { i128, i1 } %6, i1 %4, 1
-; CHECK:  %success = extractvalue { i128, i1 } %7, 1
-; CHECK:  %newloaded = extractvalue { i128, i1 } %7, 0
+; CHECK:  %7 = insertvalue { i128, i1 } poison, i128 %6, 0
+; CHECK:  %8 = insertvalue { i128, i1 } %7, i1 %5, 1
+; CHECK:  %success = extractvalue { i128, i1 } %8, 1
+; CHECK:  %newloaded = extractvalue { i128, i1 } %8, 0
 ; CHECK:  br i1 %success, label %atomicrmw.end, label %atomicrmw.start
 ; CHECK:atomicrmw.end:
 ; CHECK:  ret i128 %newloaded

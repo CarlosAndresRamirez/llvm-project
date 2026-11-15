@@ -18,9 +18,11 @@
 #include "mlir/Dialect/Affine/Analysis/LoopAnalysis.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Affine/IR/AffineValueMap.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/IntegerSet.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/SmallVectorExtras.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/DebugLog.h"
 #include "llvm/Support/raw_ostream.h"
@@ -241,7 +243,108 @@ addNodeToMDG(Operation *nodeOp, MemRefDependenceGraph &mdg,
   return &node;
 }
 
-bool MemRefDependenceGraph::init() {
+/// Returns true if `op` may read from or write to `memref`.
+static bool mayAccessMemRef(Operation *op, Value memref) {
+  SmallVector<Value> effectedValues;
+  getEffectedValues<MemoryEffects::Read, MemoryEffects::Write>(op,
+                                                               effectedValues);
+  if (llvm::is_contained(effectedValues, memref))
+    return true;
+
+  auto memoryEffectOp = dyn_cast<MemoryEffectOpInterface>(op);
+  if (!memoryEffectOp)
+    return false;
+
+  SmallVector<MemoryEffects::EffectInstance> effects;
+  memoryEffectOp.getEffects(effects);
+  return llvm::any_of(effects, [](const auto &effect) {
+    if (!isa<MemoryEffects::Read, MemoryEffects::Write>(effect.getEffect()))
+      return false;
+
+    // Value-less read/write effects may target unknown memory. Since this is a
+    // may-analysis, conservatively assume they may access the memref.
+    return !effect.getValue();
+  });
+}
+
+/// Returns true if there may be a dependence on `memref` from srcNode's
+/// memory ops to dstNode's memory ops, while using the affine memory
+/// dependence analysis checks. The method assumes that there is at least one
+/// memory op in srcNode's loads and stores on `memref`, and similarly for
+/// `dstNode`. `srcNode.op` and `destNode.op` are expected to be nested in the
+/// same block and so the dependences are tested at the depth of that block.
+static bool mayDependence(const Node &srcNode, const Node &dstNode,
+                          Value memref) {
+  assert(srcNode.op->getBlock() == dstNode.op->getBlock());
+  if (!isa<AffineForOp>(srcNode.op) || !isa<AffineForOp>(dstNode.op))
+    return true;
+
+  // Conservatively handle dependences involving non-affine load/stores. Return
+  // true if there exists a conflicting read/write access involving such.
+
+  // Check whether there is a dependence from a source read/write op to a
+  // destination read/write op on `memref`.
+  auto hasNonAffineDep = [&](ArrayRef<Operation *> srcMemOps,
+                             ArrayRef<Operation *> dstMemOps) {
+    return llvm::any_of(srcMemOps,
+                        [&](Operation *srcOp) {
+                          return mayAccessMemRef(srcOp, memref);
+                        }) &&
+           llvm::any_of(dstMemOps, [&](Operation *dstOp) {
+             return mayAccessMemRef(dstOp, memref);
+           });
+  };
+
+  SmallVector<Operation *> dstOps;
+  // Between non-affine src stores and dst load/store.
+  llvm::append_range(dstOps, llvm::concat<Operation *const>(
+                                 dstNode.loads, dstNode.stores,
+                                 dstNode.memrefLoads, dstNode.memrefStores));
+  if (hasNonAffineDep(srcNode.memrefStores, dstOps))
+    return true;
+  // Between non-affine loads and dst stores.
+  dstOps.clear();
+  llvm::append_range(dstOps, llvm::concat<Operation *const>(
+                                 dstNode.stores, dstNode.memrefStores));
+  if (hasNonAffineDep(srcNode.memrefLoads, dstOps))
+    return true;
+  // Between affine stores and memref load/stores.
+  dstOps.clear();
+  llvm::append_range(dstOps, llvm::concat<Operation *const>(
+                                 dstNode.memrefLoads, dstNode.memrefStores));
+  if (hasNonAffineDep(srcNode.stores, dstOps))
+    return true;
+  // Between affine loads and memref stores.
+  dstOps.clear();
+  llvm::append_range(dstOps, dstNode.memrefStores);
+  if (hasNonAffineDep(srcNode.loads, dstOps))
+    return true;
+
+  // Affine load/store pairs. We don't need to check for locally allocated
+  // memrefs since the dependence analysis here is between mem ops from
+  // srcNode's for op to dstNode's for op at the depth at which those
+  // `affine.for` ops are nested, i.e., dependences at depth `d + 1` where
+  // `d` is the number of common surrounding loops.
+  for (auto *srcMemOp :
+       llvm::concat<Operation *const>(srcNode.stores, srcNode.loads)) {
+    MemRefAccess srcAcc(srcMemOp);
+    if (srcAcc.memref != memref)
+      continue;
+    for (auto *destMemOp :
+         llvm::concat<Operation *const>(dstNode.stores, dstNode.loads)) {
+      MemRefAccess destAcc(destMemOp);
+      if (destAcc.memref != memref)
+        continue;
+      // Check for a top-level dependence between srcNode and destNode's ops.
+      if (!noDependence(checkMemrefAccessDependence(
+              srcAcc, destAcc, getNestingDepth(srcNode.op) + 1)))
+        return true;
+    }
+  }
+  return false;
+}
+
+bool MemRefDependenceGraph::init(bool fullAffineDependences) {
   LDBG() << "--- Initializing MDG ---";
   // Map from a memref to the set of ids of the nodes that have ops accessing
   // the memref.
@@ -344,8 +447,12 @@ bool MemRefDependenceGraph::init() {
         Node *dstNode = getNode(dstId);
         bool dstHasStoreOrFree =
             dstNode->hasStore(srcMemRef) || dstNode->hasFree(srcMemRef);
-        if (srcHasStoreOrFree || dstHasStoreOrFree)
-          addEdge(srcId, dstId, srcMemRef);
+        if ((srcHasStoreOrFree || dstHasStoreOrFree)) {
+          // Check precise affine deps if asked for; otherwise, conservative.
+          if (!fullAffineDependences ||
+              mayDependence(*srcNode, *dstNode, srcMemRef))
+            addEdge(srcId, dstId, srcMemRef);
+        }
       }
     }
   }
@@ -562,13 +669,13 @@ MemRefDependenceGraph::getFusedLoopNestInsertionPoint(unsigned srcId,
   }
 
   // Build set of insts in range (srcId, dstId) which depend on 'srcId'.
-  SmallPtrSet<Operation *, 2> srcDepInsts;
+  llvm::SmallPtrSet<Operation *, 2> srcDepInsts;
   for (auto &outEdge : outEdges.lookup(srcId))
     if (outEdge.id != dstId)
       srcDepInsts.insert(getNode(outEdge.id)->op);
 
   // Build set of insts in range (srcId, dstId) on which 'dstId' depends.
-  SmallPtrSet<Operation *, 2> dstDepInsts;
+  llvm::SmallPtrSet<Operation *, 2> dstDepInsts;
   for (auto &inEdge : inEdges.lookup(dstId))
     if (inEdge.id != srcId)
       dstDepInsts.insert(getNode(inEdge.id)->op);
@@ -752,6 +859,10 @@ void MemRefDependenceGraph::print(raw_ostream &os) const {
   }
 }
 
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
+void MemRefDependenceGraph::dump() const { print(llvm::errs()); }
+#endif
+
 void mlir::affine::getAffineForIVs(Operation &op,
                                    SmallVectorImpl<AffineForOp> *loops) {
   auto *currOp = op.getParentOp();
@@ -842,6 +953,7 @@ void ComputationSliceState::clearBounds() {
   ubOperands.clear();
 }
 
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
 void ComputationSliceState::dump() const {
   llvm::errs() << "\tIVs:\n";
   for (Value iv : ivs)
@@ -863,6 +975,7 @@ void ComputationSliceState::dump() const {
       llvm::errs() << "\t\t\t" << ubOp << "\n";
   }
 }
+#endif
 
 /// Fast check to determine if the computation slice is maximal. Returns true if
 /// each slice dimension maps to an existing dst dimension and both the src
@@ -959,12 +1072,6 @@ std::optional<bool> ComputationSliceState::isSliceValid() const {
     LDBG() << "Unable to compute source's domain";
     return std::nullopt;
   }
-  // As the set difference utility currently cannot handle symbols in its
-  // operands, validity of the slice cannot be determined.
-  if (srcConstraints.getNumSymbolVars() > 0) {
-    LDBG() << "Cannot handle symbols in source domain";
-    return std::nullopt;
-  }
   // TODO: Handle local vars in the source domains while using the 'projectOut'
   // utility below. Currently, aligning is not done assuming that there will be
   // no local vars in the source domain.
@@ -985,6 +1092,8 @@ std::optional<bool> ComputationSliceState::isSliceValid() const {
   // domain completely in terms of source's IVs.
   sliceConstraints.projectOut(ivs.size(),
                               sliceConstraints.getNumVars() - ivs.size());
+  srcConstraints.projectOut(ivs.size(),
+                            srcConstraints.getNumVars() - ivs.size());
 
   LDBG() << "Domain of the source of the slice:\n"
          << "Source constraints:" << srcConstraints
@@ -1511,8 +1620,7 @@ unsigned mlir::affine::getInnermostCommonLoopDepth(
   unsigned loopDepthLimit = std::numeric_limits<unsigned>::max();
   for (unsigned i = 0; i < numOps; ++i) {
     getAffineForIVs(*ops[i], &loops[i]);
-    loopDepthLimit =
-        std::min(loopDepthLimit, static_cast<unsigned>(loops[i].size()));
+    loopDepthLimit = std::min(loopDepthLimit, (unsigned)loops[i].size());
   }
 
   unsigned loopDepth = 0;
@@ -1661,7 +1769,8 @@ mlir::affine::computeSliceUnion(ArrayRef<Operation *> opsA,
   // Get slice bounds from slice union constraints 'sliceUnionCst'.
   sliceUnionCst.getSliceBounds(/*offset=*/0, numSliceLoopIVs,
                                opsA[0]->getContext(), &sliceUnion->lbs,
-                               &sliceUnion->ubs);
+                               &sliceUnion->ubs, /*closedUb=*/false,
+                               /*allowMultiResultUb=*/true);
 
   // Add slice bound operands of union.
   SmallVector<Value, 4> sliceBoundOperands;
@@ -1698,21 +1807,36 @@ mlir::affine::computeSliceUnion(ArrayRef<Operation *> opsA,
   return SliceComputationResult::Success;
 }
 
-// TODO: extend this to handle multiple result maps.
+/// Returns the number of iterations the slice bounded below by `lbMap` and
+/// above by `ubMap` runs for, where that is a constant.
+///
+/// An upper bound of several results is the min of them, so each result taken
+/// against the lower bound bounds the count from above and the smallest of
+/// those that comes out constant is the tightest constant bound there is. A
+/// tiled loop clamped at the end of the data has exactly this shape --
+/// `min(%i * 64 + 64, 1000)` over `%i * 64` -- where the tile-relative result
+/// gives the 64 and the extent gives nothing constant at all.
 static std::optional<uint64_t> getConstDifference(AffineMap lbMap,
                                                   AffineMap ubMap) {
-  assert(lbMap.getNumResults() == 1 && "expected single result bound map");
-  assert(ubMap.getNumResults() == 1 && "expected single result bound map");
+  assert(lbMap.getNumResults() == 1 && "expected single result lower bound");
+  assert(ubMap.getNumResults() >= 1 && "expected at least one upper bound");
   assert(lbMap.getNumDims() == ubMap.getNumDims());
   assert(lbMap.getNumSymbols() == ubMap.getNumSymbols());
   AffineExpr lbExpr(lbMap.getResult(0));
-  AffineExpr ubExpr(ubMap.getResult(0));
-  auto loopSpanExpr = simplifyAffineExpr(ubExpr - lbExpr, lbMap.getNumDims(),
-                                         lbMap.getNumSymbols());
-  auto cExpr = dyn_cast<AffineConstantExpr>(loopSpanExpr);
-  if (!cExpr)
-    return std::nullopt;
-  return cExpr.getValue();
+  std::optional<uint64_t> tripCount;
+  for (AffineExpr ubExpr : ubMap.getResults()) {
+    AffineExpr loopSpanExpr = simplifyAffineExpr(
+        ubExpr - lbExpr, lbMap.getNumDims(), lbMap.getNumSymbols());
+    auto cExpr = dyn_cast<AffineConstantExpr>(loopSpanExpr);
+    if (!cExpr)
+      continue;
+    if (cExpr.getValue() < 0)
+      return 0;
+    tripCount =
+        std::min(tripCount.value_or(std::numeric_limits<uint64_t>::max()),
+                 (uint64_t)cExpr.getValue());
+  }
+  return tripCount;
 }
 
 // Builds a map 'tripCountMap' from AffineForOp to constant trip count for loop
@@ -1740,9 +1864,9 @@ bool mlir::affine::buildSliceTripCountMap(
             forOp.getConstantUpperBound() - forOp.getConstantLowerBound();
         continue;
       }
-      std::optional<uint64_t> maybeConstTripCount = getConstantTripCount(forOp);
+      std::optional<APInt> maybeConstTripCount = forOp.getStaticTripCount();
       if (maybeConstTripCount.has_value()) {
-        (*tripCountMap)[op] = *maybeConstTripCount;
+        (*tripCountMap)[op] = maybeConstTripCount->getZExtValue();
         continue;
       }
       return false;
@@ -1806,7 +1930,8 @@ void mlir::affine::getComputationSliceState(
 
   // Get bounds for slice IVs in terms of other IVs, symbols, and constants.
   sliceCst.getSliceBounds(offset, numSliceLoopIVs, depSourceOp->getContext(),
-                          &sliceState->lbs, &sliceState->ubs);
+                          &sliceState->lbs, &sliceState->ubs,
+                          /*closedUb=*/false, /*allowMultiResultUb=*/true);
 
   // Set up bound operands for the slice's lower and upper bounds.
   SmallVector<Value, 4> sliceBoundOperands;
@@ -1852,7 +1977,8 @@ void mlir::affine::getComputationSliceState(
   for (unsigned i = 0; i < numSliceLoopIVs; ++i) {
     Value iv = getSliceLoop(i).getInductionVar();
     if (sequentialLoops.count(iv) == 0 &&
-        getSliceLoop(i)->getAttr(kSliceFusionBarrierAttrName) == nullptr)
+        getSliceLoop(i)->getDiscardableAttr(kSliceFusionBarrierAttrName) ==
+            nullptr)
       continue;
     // Skip reset of bounds of reduction loop inserted in the destination loop
     // that meets the following conditions:
@@ -2102,23 +2228,26 @@ void mlir::affine::getSequentialLoops(
 }
 
 IntegerSet mlir::affine::simplifyIntegerSet(IntegerSet set) {
-  FlatAffineValueConstraints fac(set);
-  if (fac.isEmpty())
+  FailureOr<FlatAffineValueConstraints> fac =
+      FlatAffineValueConstraints::create(set);
+  // Semi-affine sets can't be flattened; return them as is.
+  if (failed(fac))
+    return set;
+  if (fac->isEmpty())
     return IntegerSet::getEmptySet(set.getNumDims(), set.getNumSymbols(),
                                    set.getContext());
-  fac.removeTrivialRedundancy();
+  fac->removeTrivialRedundancy();
 
-  auto simplifiedSet = fac.getAsIntegerSet(set.getContext());
+  auto simplifiedSet = fac->getAsIntegerSet(set.getContext());
   assert(simplifiedSet && "guaranteed to succeed while roundtripping");
   return simplifiedSet;
 }
 
 static void unpackOptionalValues(ArrayRef<std::optional<Value>> source,
                                  SmallVector<Value> &target) {
-  target =
-      llvm::to_vector<4>(llvm::map_range(source, [](std::optional<Value> val) {
-        return val.has_value() ? *val : Value();
-      }));
+  target = llvm::map_to_vector<4>(source, [](std::optional<Value> val) {
+    return val.has_value() ? *val : Value();
+  });
 }
 
 /// Bound an identifier `pos` in a given FlatAffineValueConstraints with
@@ -2288,6 +2417,47 @@ FailureOr<AffineValueMap> mlir::affine::simplifyConstrainedMinMaxOp(
                               newMap.getNumDims(), newMap.getNumSymbols());
     }
   }
+
+  // Internal constraint variables (dimOp, dimOpBound, resultDimStart, etc.)
+  // have no associated SSA values (null Value()). Replace their corresponding
+  // dim/symbol positions in newMap with constant 0 and compact newOperands.
+  // These positions should be unreferenced in newMap (the bound was computed
+  // in terms of the original operands only), so replacing with 0 is safe.
+  // This prevents canonicalizeMapAndOperands from using null Values as
+  // DenseMap keys, which would cause undefined behavior.
+  {
+    unsigned numDims = newMap.getNumDims();
+    unsigned numSyms = newMap.getNumSymbols();
+    SmallVector<AffineExpr> dimReplacements(numDims), symReplacements(numSyms);
+    SmallVector<Value> filteredOperands;
+    filteredOperands.reserve(newOperands.size());
+    unsigned newDim = 0;
+    for (unsigned i = 0; i < numDims; ++i) {
+      if (newOperands[i]) {
+        dimReplacements[i] = getAffineDimExpr(newDim++, ctx);
+        filteredOperands.push_back(newOperands[i]);
+      } else {
+        assert(!newMap.isFunctionOfDim(i) &&
+               "null-valued dim operand referenced in bound map");
+        dimReplacements[i] = getAffineConstantExpr(0, ctx);
+      }
+    }
+    unsigned newSym = 0;
+    for (unsigned i = 0; i < numSyms; ++i) {
+      if (newOperands[numDims + i]) {
+        symReplacements[i] = getAffineSymbolExpr(newSym++, ctx);
+        filteredOperands.push_back(newOperands[numDims + i]);
+      } else {
+        assert(!newMap.isFunctionOfSymbol(i) &&
+               "null-valued symbol operand referenced in bound map");
+        symReplacements[i] = getAffineConstantExpr(0, ctx);
+      }
+    }
+    newMap = newMap.replaceDimsAndSymbols(dimReplacements, symReplacements,
+                                          newDim, newSym);
+    newOperands = std::move(filteredOperands);
+  }
+
   affine::canonicalizeMapAndOperands(&newMap, &newOperands);
   return AffineValueMap(newMap, newOperands);
 }

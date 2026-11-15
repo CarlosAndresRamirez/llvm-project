@@ -31,20 +31,12 @@
 
 using namespace mlir;
 using namespace mlir::tblgen;
-using llvm::Record;
 using llvm::RecordKeeper;
 
 static llvm::cl::OptionCategory dialectGenCat("Options for -gen-dialect-*");
 static llvm::cl::opt<std::string>
     selectedDialect("dialect", llvm::cl::desc("The dialect to gen for"),
                     llvm::cl::cat(dialectGenCat), llvm::cl::CommaSeparated);
-
-/// Utility iterator used for filtering records for a specific dialect.
-namespace {
-using DialectFilterIterator =
-    llvm::filter_iterator<ArrayRef<Record *>::iterator,
-                          std::function<bool(const Record *)>>;
-} // namespace
 
 static void populateDiscardableAttributes(
     Dialect &dialect, const llvm::DagInit *discardableAttrDag,
@@ -59,18 +51,6 @@ static void populateDiscardableAttributes(
     discardableAttributes.push_back(
         {givenName.str(), arg->getAsUnquotedString()});
   }
-}
-
-/// Given a set of records for a T, filter the ones that correspond to
-/// the given dialect.
-template <typename T>
-static iterator_range<DialectFilterIterator>
-filterForDialect(ArrayRef<Record *> records, Dialect &dialect) {
-  auto filterFn = [&](const Record *record) {
-    return T(record).getDialect() == dialect;
-  };
-  return {DialectFilterIterator(records.begin(), records.end(), filterFn),
-          DialectFilterIterator(records.end(), records.end(), filterFn)};
 }
 
 std::optional<Dialect>
@@ -109,9 +89,7 @@ tblgen::findDialectToGenerate(ArrayRef<Dialect> dialects) {
 /// {0}: The name of the dialect class.
 /// {1}: The dialect namespace.
 /// {2}: The dialect parent class.
-/// {3}: The summary and description comments.
 static const char *const dialectDeclBeginStr = R"(
-{3}
 class {0} : public ::mlir::{2} {
   explicit {0}(::mlir::MLIRContext *context);
 
@@ -209,25 +187,25 @@ static const char *const discardableAttrHelperDecl = R"(
       static constexpr ::llvm::StringLiteral getNameStr() {{
         return "{4}.{1}";
       }
-      constexpr ::mlir::StringAttr getName() {{
+      constexpr ::mlir::StringAttr getName() const {{
         return name;
       }
 
-      {0}AttrHelper(::mlir::MLIRContext *ctx)
+      explicit {0}AttrHelper(::mlir::MLIRContext *ctx)
         : name(::mlir::StringAttr::get(ctx, getNameStr())) {{}
 
-     {2} getAttr(::mlir::Operation *op) {{
-       return op->getAttrOfType<{2}>(name);
+     {2} getAttr(::mlir::Operation *op) const {{
+       return op->getDiscardableAttrOfType<{2}>(name);
      }
-     void setAttr(::mlir::Operation *op, {2} val) {{
-       op->setAttr(name, val);
+     void setAttr(::mlir::Operation *op, {2} val) const {{
+       op->setDiscardableAttr(name, val);
      }
-     bool isAttrPresent(::mlir::Operation *op) {{
-       return op->hasAttrOfType<{2}>(name);
+     bool isAttrPresent(::mlir::Operation *op) const {{
+       return op->hasDiscardableAttrOfType<{2}>(name);
      }
-     void removeAttr(::mlir::Operation *op) {{
-       assert(op->hasAttrOfType<{2}>(name));
-       op->removeAttr(name);
+     void removeAttr(::mlir::Operation *op) const {{
+       assert(op->hasDiscardableAttrOfType<{2}>(name));
+       op->removeDiscardableAttr(name);
      }
    };
    {0}AttrHelper get{0}AttrHelper() {
@@ -242,17 +220,18 @@ static const char *const discardableAttrHelperDecl = R"(
 static void emitDialectDecl(Dialect &dialect, raw_ostream &os) {
   // Emit all nested namespaces.
   {
-    NamespaceEmitter nsEmitter(os, dialect);
+    DialectNamespaceEmitter nsEmitter(os, dialect);
 
     // Emit the start of the decl.
     std::string cppName = dialect.getCppClassName();
     StringRef superClassName =
         dialect.isExtensible() ? "ExtensibleDialect" : "Dialect";
 
-    std::string comments = tblgen::emitSummaryAndDescComments(
-        dialect.getSummary(), dialect.getDescription());
+    tblgen::emitSummaryAndDescComments(os, dialect.getSummary(),
+                                       dialect.getDescription(),
+                                       /*terminateCmment=*/false);
     os << llvm::formatv(dialectDeclBeginStr, cppName, dialect.getName(),
-                        superClassName, comments);
+                        superClassName);
 
     // If the dialect requested the default attribute printer and parser, emit
     // the declarations for the hooks.
@@ -304,6 +283,22 @@ static void emitDialectDecl(Dialect &dialect, raw_ostream &os) {
        << "::" << dialect.getCppClassName() << ")\n";
 }
 
+/// Emit the `#include` directives for the headers declaring the C++ constructs
+/// used by the declaration of `dialect`.
+static void emitDialectDeclIncludes(const Dialect &dialect, raw_ostream &os) {
+  SmallVector<StringRef> includes;
+  // `::mlir::Dialect` or `::mlir::ExtensibleDialect`.
+  includes.push_back(dialect.isExtensible() ? "mlir/IR/ExtensibleDialect.h"
+                                            : "mlir/IR/Dialect.h");
+  if (dialect.getDiscardableAttributes()->getNumArgs() != 0) {
+    // `::mlir::StringAttr` and `::mlir::Operation`, used by the discardable
+    // attribute helpers.
+    includes.push_back("mlir/IR/BuiltinAttributes.h");
+    includes.push_back("mlir/IR/Operation.h");
+  }
+  tblgen::emitIncludes(os, includes);
+}
+
 static bool emitDialectDecls(const RecordKeeper &records, raw_ostream &os) {
   emitSourceFileHeader("Dialect Declarations", os, records);
 
@@ -315,6 +310,7 @@ static bool emitDialectDecls(const RecordKeeper &records, raw_ostream &os) {
   std::optional<Dialect> dialect = findDialectToGenerate(dialects);
   if (!dialect)
     return true;
+  emitDialectDeclIncludes(*dialect, os);
   emitDialectDecl(*dialect, os);
   return false;
 }
@@ -358,7 +354,7 @@ static void emitDialectDef(Dialect &dialect, const RecordKeeper &records,
        << "::" << cppClassName << ")\n";
 
   // Emit all nested namespaces.
-  NamespaceEmitter nsEmitter(os, dialect);
+  DialectNamespaceEmitter nsEmitter(os, dialect);
 
   /// Build the list of dependent dialects.
   std::string dependentDialectRegistrations;
@@ -407,6 +403,9 @@ static bool emitDialectDefs(const RecordKeeper &records, raw_ostream &os) {
   std::optional<Dialect> dialect = findDialectToGenerate(dialects);
   if (!dialect)
     return true;
+  // `::mlir::MLIRContext::loadDialect`, used to load the dependent dialects.
+  if (!dialect->getDependentDialects().empty())
+    tblgen::emitIncludes(os, StringRef("mlir/IR/MLIRContext.h"));
   emitDialectDef(*dialect, records, os);
   return false;
 }
